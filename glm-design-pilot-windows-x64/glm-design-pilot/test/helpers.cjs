@@ -21,7 +21,9 @@ async function start(file, env = {}) {
   let output = '';
   child.stdout.on('data', (b) => (output += b));
   child.stderr.on('data', (b) => (output += b));
-  for (let n = 0; n < 120; n++) {
+  // Cold Windows process launches can be delayed by endpoint scanning. Allow
+  // startup to finish; test operations still retain their own bounded timeouts.
+  for (let n = 0; n < 600; n++) {
     if (child.exitCode !== null) throw new Error(output);
     try {
       if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok)

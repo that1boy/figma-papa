@@ -1,6 +1,8 @@
-# Forma — GLM Design Pilot
+# Forma — Design studio
 
 A small, self-hosted application for evaluating a local GLM model on web prototypes, presentations, and documents. The deliverable is a Docker app with a real model adapter, editable exports, saved revisions, and human evaluation records.
+
+Version **0.2.0** adds a UI/UX studio: linked screens, visual property editing, layers and components, reusable styles, revision feedback, exploration copies and offline handoff ZIPs. Three curated starter flows work without a model. Existing presentations and documents remain editable and exportable. See [STUDIO-GUIDE.md](STUDIO-GUIDE.md), [TEAM-REVIEW.md](TEAM-REVIEW.md) and [RELEASE-NOTES.md](RELEASE-NOTES.md). The Windows update reuses your installed runtime and dependencies; follow [UPDATE-WINDOWS.txt](UPDATE-WINDOWS.txt).
 
 **This is a shared-workspace pilot, not the 2,000-concurrent-user production system.** It defaults to two generation jobs at a time and a queue of twenty. Validate output quality with a small group before expanding the architecture.
 
@@ -22,6 +24,14 @@ Open **http://localhost:8080**. The initial demo password is **`local-pilot-chan
 The host port is bound to `127.0.0.1` by default. For a remote server, use an SSH tunnel (`ssh -L 8080:127.0.0.1:8080 user@server`) or place an internal TLS reverse proxy in front of the app. Before sharing access, replace the password and secrets in `.env`. Keep the renderer's port unpublished.
 
 **Demo mode loads fixed examples. It does not interpret prompts or images and is not evidence of GLM quality.** The interface and exported evaluation data identify demo results explicitly. A failed GLM call never falls back to demo content.
+
+## Continue without a model
+
+Choose **Import Forma JSON** in the sidebar and select a JSON export from Forma (up to 1 MB). Supply the original brief if available. JSON exports do not contain reference images or revision history; reattach images in their original slots (PNG/JPEG, up to 3 MB each). Imports create a new project and leave the source project intact. They use the same artifact validation and web restrictions as generated work.
+
+Use **Edit** to make changes, **History** to restore saved versions, and **Export** for HTML, editable PPTX/DOCX or JSON. These operations make no model calls. PDF and native page images still require a working renderer. Imports and their manual revisions are labelled separately and excluded from GLM evaluation summaries; the file cannot claim trusted model provenance. This imports Forma JSON, not arbitrary Office files or HTML.
+
+Demo mode remains a fixed sample loader for new demo projects. Revise is disabled for imported artifacts, curated starters and exploration copies while in demo mode; use the canvas or Edit instead. Connect a model when you need new AI generation or model review. Local fixture tests do not establish actual GLM output quality.
 
 ## Connect your internal GLM service
 
@@ -71,7 +81,8 @@ For a corporate CA, mount its PEM file into the **app** container and set `NODE_
 - Up to two PNG/JPEG references, resized locally in the browser and sent to the configured model as data URLs.
 - Per-project brand guidance and a prompt for each generation or revision.
 - Structural validation, with one model repair attempt for invalid artifact JSON.
-- Rendering followed by optional model visual review and at most one correction pass.
+- Optional model content review against the source briefs, plus visual review when rendering succeeds, with at most one correction pass.
+- Original and subsequent briefs follow the selected revision branch. Manual field changes are included; restoring a revision excludes later abandoned instructions. Omitted theme fields inherit from the selected base.
 - Persistent projects and version history, manual content editing, historical preview, and restore as a new revision.
 - Web HTML download, native editable PPTX and DOCX, artifact JSON, and PDF after successful rendering.
 - Job progress, bounded concurrency, cancellation, and explicit error reporting.
@@ -79,7 +90,7 @@ For a corporate CA, mount its PEM file into the **app** container and set `NODE_
 
 ### Web prototypes
 
-The model produces HTML and CSS. The server sanitizes markup and restricts CSS resources. A small trusted script implements toggles, tabs, filters, dialogs, and local form confirmations. Previews run in sandboxed iframes with a restrictive content policy.
+The model produces HTML and CSS. The server sanitizes markup and restricts CSS resources. An application-owned runtime implements screen navigation, toggles, tabs, filters, dismissible dialogs, and local form confirmations. Designs support up to twelve linked screens sharing CSS; existing single-page artifacts still work. Previews run in sandboxed iframes with a restrictive content policy.
 
 **Arbitrary generated JavaScript, React builds, backend code, external links, and live data connections are outside this pilot.** Forms do not submit data. Downloaded HTML keeps the same supported interactions and bundled image references.
 
@@ -91,11 +102,13 @@ The default Preview tab is an **HTML approximation**. Choose **Rendered export**
 
 ### Visual review boundaries
 
-- Web review sees the first desktop viewport. It does not automatically exercise every interaction or responsive breakpoint.
-- Office rendering captures up to 16 pages. The model review receives the first four screenshots at most, with the page count stated in its prompt.
+- Web rendering captures each screen at desktop 1280 px, tablet 768 px and mobile 390 px, plus the mobile bottom when needed. Checks reports overflow, missing mobile table labels, unnamed controls, duplicate IDs, missing interaction targets and buttons with no action. This is not a complete accessibility audit, and it does not exercise every interaction or inspect every scroll position.
+- Office rendering captures up to 16 pages and records the configured converter version. Review now sends every captured image in batches of four. Capture limits and full page/view counts are recorded; multiple batches add model calls and latency. Native rendering requires the actual converter, not a substituted image generator.
 - If the model finds issues, the app allows one correction pass and re-renders. It does not claim that the corrected output has passed an independent review.
 - A successful render does not establish factual correctness, accessibility, or business usability.
-- If rendering is unavailable, the artifact remains editable and exportable as HTML/PPTX/DOCX/JSON. PDF and image review are explicitly unavailable. Use **Checks → Render exports** after fixing the renderer.
+- If rendering is unavailable, optional content review still runs against the briefs. Checks labels this as content-only. Native layout, PDF and image review remain unavailable. Use **Checks → Render exports** after fixing the renderer.
+- Content review adds a model call even when Office rendering is unavailable; a correction adds another call. It can miss factual errors. Earlier briefs are bounded to 96,000 characters, retaining the original plus a contiguous recent suffix; omissions are reported. Large manual changes may consume that budget.
+- The first 0.1.2 startup adds revision parent links to SQLite and reconstructs older links from generation jobs, restores and manual-edit ordering. Keep a stopped copy of your old installation/data before upgrading. This migration does not change saved artifacts or evaluation scores.
 - Manually edited content needs a fresh render; previews from older revisions are not reused for it.
 
 ## Pilot evaluation
@@ -121,7 +134,7 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-For a locally installed Chrome instead, set `BROWSER_EXECUTABLE` to its executable path. The browser smoke test exercises login, all three project types, supported web interactions, responsive preview, manual edits, downloads, revision history, and evaluations. Office rendering needs LibreOffice and Poppler locally, or the renderer container. A failed native render is surfaced, never silently certified.
+For a locally installed Chrome instead, set `BROWSER_EXECUTABLE` to its executable path. Both browser suites exercise login, all three project types, supported web interactions, responsive preview, manual edits, downloads, revision history, and evaluations. Office rendering needs LibreOffice and Poppler locally, or the renderer container. A failed native render is surfaced, never silently certified.
 
 After starting the Docker stack, run the native export smoke test **in demo mode**:
 
@@ -154,7 +167,7 @@ Build the images once in an approved build environment, then mirror them to your
 
 ```sh
 docker compose build
-docker save -o glm-design-pilot-images.tar glm-design-pilot-app:0.1.0 glm-design-pilot-renderer:0.1.0
+docker save -o glm-design-pilot-images.tar glm-design-pilot-app:0.1.2 glm-design-pilot-renderer:0.1.2
 # On the internal host:
 docker load -i glm-design-pilot-images.tar
 docker compose up -d --no-build --pull never

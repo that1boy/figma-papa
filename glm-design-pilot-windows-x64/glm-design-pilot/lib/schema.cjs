@@ -59,6 +59,9 @@ function safeCSS(css) {
 }
 function safeHTML(html) {
   return sanitize(str(html, 'HTML', 160000, true), {
+    // A model may return a full document despite the body-fragment instruction.
+    // Drop metadata text with its container instead of leaking it into the page.
+    nonTextTags: ['script', 'style', 'textarea', 'option', 'head', 'title'],
     allowedTags: [
       'main',
       'header',
@@ -82,6 +85,9 @@ function safeHTML(html) {
       'ul',
       'ol',
       'li',
+      'dl',
+      'dt',
+      'dd',
       'a',
       'button',
       'input',
@@ -109,8 +115,18 @@ function safeHTML(html) {
         'hidden',
         'role',
         'aria-label',
+        'aria-labelledby',
+        'aria-modal',
+        'aria-pressed',
         'aria-selected',
         'aria-expanded',
+        'aria-controls',
+        'aria-describedby',
+        'aria-current',
+        'aria-live',
+        'tabindex',
+        'title',
+        'data-design-id',
         'data-action',
         'data-target',
         'data-group',
@@ -119,12 +135,14 @@ function safeHTML(html) {
       ],
       a: ['href'],
       img: ['src', 'alt', 'width', 'height'],
-      input: ['type', 'placeholder', 'value', 'required', 'name', 'min', 'max'],
+      input: ['type', 'placeholder', 'value', 'required', 'name', 'min', 'max', 'step', 'checked', 'disabled', 'autocomplete'],
       label: ['for'],
-      select: ['name'],
+      select: ['name', 'required', 'disabled'],
       option: ['value', 'selected'],
-      textarea: ['placeholder', 'name', 'rows'],
-      button: ['type'],
+      textarea: ['placeholder', 'name', 'rows', 'required', 'disabled'],
+      button: ['type', 'disabled'],
+      td: ['data-label'],
+      th: ['data-label', 'scope'],
     },
     allowedSchemes: [],
     allowedEmptyAttributes: ['hidden', 'data-row'],
@@ -178,8 +196,18 @@ function artifact(a, expectedKind) {
     theme: theme(a.theme),
   };
   if (a.kind === 'web') {
-    out.html = safeHTML(a.html);
+    if (a.screens != null) {
+      out.screens = arr(a.screens, 'Screens', 12).map((s) => {
+        if (!s || typeof s !== 'object' || !/^[a-zA-Z][\w-]{0,47}$/.test(s.id)) fail('Each screen needs an ID starting with a letter, up to 48 characters.');
+        return { id: s.id, name: str(s.name, 'Screen name', 80, true), html: safeHTML(s.html) };
+      });
+      if (!out.screens.length || new Set(out.screens.map(s => s.id)).size !== out.screens.length) fail('Use 1–12 screens with unique IDs.');
+      if (out.screens.some(s => s.html.length < 10)) fail('A screen is empty after sanitization.');
+      if (out.screens.reduce((n,s) => n + s.html.length, 0) > 400000) fail('Combined screen HTML exceeds 400,000 characters.');
+    }
+    out.html = out.screens ? out.screens[0].html : safeHTML(a.html);
     out.css = safeCSS(a.css);
+    if (a.designSystem) out.designSystem = designSystem(a.designSystem);
     if (out.html.length < 10) fail('Web HTML is empty after sanitization.');
   } else if (a.kind === 'slides') {
     out.slides = arr(a.slides, 'Slides', 12).map((s, i) => {
@@ -232,6 +260,16 @@ function artifact(a, expectedKind) {
   }
   return out;
 }
+function designSystem(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('Design system must be an object.');
+  const fonts = ['Arial', 'Segoe UI', 'Georgia', 'Verdana', 'Trebuchet MS'];
+  const font = value.font || 'Segoe UI';
+  if (!fonts.includes(font)) fail('Choose a supported local font.');
+  const radius = value.radius ?? 12, spacing = value.spacing ?? 8;
+  if (!Number.isInteger(radius) || radius < 0 || radius > 40 || !Number.isInteger(spacing) || spacing < 4 || spacing > 24) fail('Radius must be 0–40 and spacing 4–24.');
+  return { name: str(value.name || 'Project style', 'Style name', 80, true), ...theme(value), surface: color(value.surface, '#ffffff'), muted: color(value.muted, '#667085'), font, radius, spacing };
+}
+function webScreens(a) { return a.screens || [{ id: 'home', name: 'Home', html: a.html }]; }
 function references(refs = []) {
   return arr(refs, 'Reference images', 2).map((r) => {
     if (
@@ -249,4 +287,4 @@ function references(refs = []) {
     return { name: str(r.name, 'Image name', 150, true), data: r.data };
   });
 }
-module.exports = { artifact, references, str, theme, KINDS, fail, safeHTML, safeCSS };
+module.exports = { artifact, references, str, theme, KINDS, fail, safeHTML, safeCSS, designSystem, webScreens };

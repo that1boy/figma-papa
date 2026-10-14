@@ -1,6 +1,7 @@
 'use strict';
 const pptxgen = require('pptxgenjs');
 const docx = require('docx');
+const { slideLayout, bodyHeight } = require('./slide-layout.cjs');
 function imageDimensions(data) {
   const b = Buffer.from(data.split(',')[1], 'base64');
   if (b[0] === 137) return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
@@ -54,33 +55,26 @@ async function exportPPTX(a, refs = []) {
       color: accent,
       charSpacing: 1.5,
     });
-    const cover = s.layout === 'cover';
+    const { cover, title, subtitle, content } = slideLayout(s);
+    slide.addShape(pptx.ShapeType.rect, { x: 0.7, y: 0.77, w: 0.6, h: 0.045, fill: { color: accent }, line: { color: accent, transparency: 100 } });
     add(s.title, {
-      x: 0.7,
-      y: cover ? 2 : 1,
-      w: 11.8,
-      h: cover ? 1.8 : 1.2,
-      fontSize: cover ? 42 : 32,
+      ...title,
       bold: true,
       valign: 'mid',
     });
     if (s.subtitle)
       add(s.subtitle, {
-        x: 0.7,
-        y: cover ? 4.05 : 2.22,
-        w: 11.5,
-        h: 0.7,
-        fontSize: 22,
-        color: '666674',
+        ...subtitle,
       });
     if (s.layout === 'two-column') {
       s.columns.forEach((c, j) => {
         const x = 0.7 + j * 6.05;
-        add(c.heading, { x, y: 2.65, w: 5.5, h: 0.5, fontSize: 24, color: accent, bold: true });
-        let y = 3.35;
+        add(c.heading, { x, y: content.y, w: 5.5, h: 0.65, fontSize: 24, color: accent, bold: true });
+        let y = content.y + 0.85;
         if (c.body) {
-          add(c.body, { x, y, w: 5.5, h: 1.2, fontSize: 19 });
-          y += 1.4;
+          const h = Math.min(bodyHeight(c.body, 5.5, 19), c.bullets.length ? 1.5 : 6.65 - y);
+          add(c.body, { x, y, w: 5.5, h, fontSize: 19 });
+          y += h + 0.2;
         }
         if (c.bullets.length)
           add(
@@ -88,10 +82,13 @@ async function exportPPTX(a, refs = []) {
               text: t,
               options: { bullet: { indent: 18 }, breakLine: true },
             })),
-            { x, y, w: 5.5, h: 6.8 - y, fontSize: 18, paraSpaceAfterPt: 12 },
+            { x, y, w: 5.5, h: 6.65 - y, fontSize: 18, paraSpaceAfterPt: 10 },
           );
       });
     } else if (s.layout === 'table') {
+      const intro = s.body ? Math.min(1, bodyHeight(s.body, content.w, 18)) + 0.18 : 0;
+      const footer = s.bullets.length ? Math.min(1.6, s.bullets.length * 0.3 + 0.15) : 0;
+      if (s.body) add(s.body, { x: content.x, y: content.y, w: content.w, h: intro - 0.18, fontSize: 18 });
       slide.addTable(
         [
           s.table.headers.map((text) => ({
@@ -102,43 +99,52 @@ async function exportPPTX(a, refs = []) {
         ],
         {
           x: 0.7,
-          y: 2.65,
+          y: content.y + intro,
           w: 11.9,
-          h: 3.7,
+          h: content.h - intro - footer,
           fontFace: 'Arial',
-          fontSize: 15,
+          fontSize: s.table.headers.length >= 5 || s.table.rows.length > 5 ? 13 : 16,
           color: text,
           border: { type: 'solid', pt: 0.5, color: 'DDDDE3' },
           margin: 0.12,
-          fill: 'FFFFFF',
+          fill: a.theme.background.slice(1),
           rowH: 0.4,
           autoPage: false,
         },
       );
+      if (s.bullets.length) add(s.bullets.map((t) => ({ text: t, options: { bullet: { indent: 14 }, breakLine: true } })), { x: content.x, y: 6.65 - footer + 0.15, w: content.w, h: footer - 0.15, fontSize: 14 });
     } else if (s.layout === 'image') {
       const ref = refs[s.imageIndex];
       if (ref) {
         const d = imageDimensions(ref.data);
-        const factor = Math.min(6 / d.width, 3.8 / d.height);
+        const factor = Math.min(6 / d.width, content.h / d.height);
         slide.addImage({
           data: ref.data,
           x: 0.7,
-          y: 2.6,
+          y: content.y,
           w: d.width * factor,
           h: d.height * factor,
         });
       }
-      if (s.body) add(s.body, { x: 7.25, y: 2.7, w: 5.2, h: 3.9, fontSize: 22 });
+      const textHeight = s.bullets.length ? Math.min(content.h * 0.45, bodyHeight(s.body, 5.2, 22)) : content.h;
+      if (s.body) add(s.body, { x: 7.25, y: content.y, w: 5.2, h: textHeight, fontSize: 22 });
+      if (s.bullets.length) {
+        const y = content.y + (s.body ? textHeight + 0.2 : 0);
+        add(s.bullets.map(t => ({text:t,options:{bullet:{indent:18},breakLine:true}})), {x:7.25,y,w:5.2,h:6.65-y,fontSize:20,paraSpaceAfterPt:10});
+      }
     } else {
-      let y = cover ? 5 : 2.7;
+      let y = content.y;
+      const split = !cover && s.body && s.bullets.length;
       if (s.body) {
-        add(s.body, { x: 0.7, y, w: 11.5, h: cover ? 1 : 1.4, fontSize: cover ? 23 : 20 });
-        y += 1.65;
+        const w = split ? 3.6 : content.w;
+        const h = split ? content.h : Math.min(bodyHeight(s.body, w, cover ? 23 : 20), s.bullets.length ? content.h * 0.45 : content.h);
+        add(s.body, { x: content.x, y, w, h, fontSize: split ? 24 : cover ? 23 : 20, color: split ? accent : text });
+        if (!split) y += h + 0.25;
       }
       if (s.bullets.length)
         add(
           s.bullets.map((t) => ({ text: t, options: { bullet: { indent: 21 }, breakLine: true } })),
-          { x: 0.85, y, w: 11.2, h: Math.max(1, 6.7 - y), fontSize: 22, paraSpaceAfterPt: 15 },
+          { x: split ? 4.8 : 0.85, y, w: split ? 7.6 : 11.2, h: 6.65 - y, fontSize: 22, paraSpaceAfterPt: 14 },
         );
     }
     add(String(index + 1).padStart(2, '0'), {
@@ -175,12 +181,12 @@ async function exportDOCX(a, refs = []) {
       children.push(new Paragraph({ text: b.text, heading: HeadingLevel.HEADING_1 }));
     else if (b.type === 'paragraph')
       children.push(
-        new Paragraph({ children: [new TextRun(b.text)], spacing: { after: 180, line: 300 } }),
+        new Paragraph({ children: [new TextRun(b.text)], spacing: { after: 120, line: 264 }, widowControl: true }),
       );
     else if (b.type === 'bullets')
       children.push(
         ...b.items.map(
-          (text) => new Paragraph({ text, bullet: { level: 0 }, spacing: { after: 120 } }),
+          (text) => new Paragraph({ text, bullet: { level: 0 }, spacing: { after: 80, line: 264 }, widowControl: true }),
         ),
       );
     else if (b.type === 'table')
@@ -196,9 +202,10 @@ async function exportDOCX(a, refs = []) {
                   (text) =>
                     new TableCell({
                       shading: i === 0 ? { fill: a.theme.accent.slice(1) } : undefined,
-                      margins: { top: 100, bottom: 100, left: 110, right: 110 },
+                      margins: { top: 85, bottom: 85, left: 110, right: 110 },
                       children: [
                         new Paragraph({
+                          spacing: { before: 0, after: 0, line: 240 },
                           children: [
                             new TextRun({
                               text,
@@ -248,8 +255,8 @@ async function exportDOCX(a, refs = []) {
     styles: {
       default: {
         document: {
-          run: { font: 'Arial', size: 23, color: a.theme.text.slice(1) },
-          paragraph: { spacing: { after: 150, line: 300 } },
+          run: { font: 'Arial', size: 22, color: a.theme.text.slice(1) },
+          paragraph: { spacing: { after: 120, line: 264 }, widowControl: true },
         },
       },
       paragraphStyles: [
@@ -258,8 +265,13 @@ async function exportDOCX(a, refs = []) {
           name: 'Title',
           basedOn: 'Normal',
           next: 'Normal',
-          run: { font: 'Arial', size: 56, bold: true, color: '111111' },
-          paragraph: { spacing: { after: 240 } },
+          run: { font: 'Arial', size: 48, bold: true, color: a.theme.text.slice(1) },
+          paragraph: { spacing: { after: 140 }, keepNext: true },
+        },
+        {
+          id: 'Subtitle', name: 'Subtitle', basedOn: 'Normal', next: 'Normal',
+          run: { font: 'Arial', size: 24, color: a.theme.text.slice(1) },
+          paragraph: { spacing: { after: 180 }, keepNext: true },
         },
         {
           id: 'Heading1',
@@ -267,8 +279,8 @@ async function exportDOCX(a, refs = []) {
           basedOn: 'Normal',
           next: 'Normal',
           quickFormat: true,
-          run: { font: 'Arial', size: 30, bold: true, color: a.theme.accent.slice(1) },
-          paragraph: { spacing: { before: 260, after: 140 }, keepNext: true },
+          run: { font: 'Arial', size: 28, bold: true, color: a.theme.accent.slice(1) },
+          paragraph: { spacing: { before: 200, after: 100 }, keepNext: true },
         },
       ],
     },

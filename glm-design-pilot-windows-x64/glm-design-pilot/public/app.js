@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id),
       /[&<>"']/g,
       (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
     );
-const names = { web: 'Web prototype', slides: 'Presentation', document: 'Document' };
+const names = { web: 'UI / UX design', slides: 'Presentation', document: 'Document' };
 const state = {
   config: null,
   projects: [],
@@ -19,6 +19,18 @@ const state = {
   native: false,
 };
 let toastTimer;
+function sourceDirty() {
+  if(state.tab !== 'edit' || !state.editor || !state.revision) return false;
+  try { return JSON.stringify(collectEditor()) !== JSON.stringify(state.revision.artifact) || $('artifact-json').value !== JSON.stringify(state.editor,null,2); }
+  catch { return true; }
+}
+function leaveSource() {
+  if(!sourceDirty()) return true;
+  if(!confirm('Discard unsaved source edits? Save a new revision first to keep them.')) return false;
+  state.editor=null;
+  return true;
+}
+addEventListener('beforeunload', e=>{if(sourceDirty()){e.preventDefault();e.returnValue='';}});
 function toast(message) {
   $('toast').textContent = message;
   $('toast').hidden = false;
@@ -73,6 +85,7 @@ async function boot() {
     ? 'Demo mode loads fixed content. Revision prompts are not interpreted.'
     : 'Your brief and references are sent to the internal model.';
   await loadProjects();
+  await window.FormaStudio?.loadStarters();
   show('library');
 }
 async function loadProjects() {
@@ -102,6 +115,9 @@ function drawProjects() {
     : '<p class="recent-empty">Your projects will<br>appear here.</p>';
 }
 function show(view) {
+  if(view !== 'workspace' && !leaveSource()) return;
+  if(view !== 'workspace' && window.FormaStudio && !window.FormaStudio.leave()) return;
+  document.body.classList.toggle('in-workspace', view === 'workspace');
   for (const id of ['library', 'workspace', 'evaluation']) $(id).hidden = id !== view;
   $('nav-projects').classList.toggle('active', view !== 'evaluation');
   $('nav-evaluation').classList.toggle('active', view === 'evaluation');
@@ -118,7 +134,10 @@ function openCreate(kind = 'web') {
   setTimeout(() => $('create-title').focus(), 50);
 }
 async function openProject(pid) {
+  if(!leaveSource()) return;
+  if(window.FormaStudio && !window.FormaStudio.leave()) return;
   clearTimeout(state.poll);
+  state.job = null;
   state.project = await api('/projects/' + pid);
   state.revision = state.project.current;
   state.tab = 'preview';
@@ -133,7 +152,12 @@ function drawWorkspace() {
   const p = state.project,
     r = state.revision;
   $('project-title').textContent = p.title;
-  $('project-kind').textContent = names[p.kind];
+  $('project-kind').textContent = names[p.kind] + (r?.metrics.mode === 'import' ? ' · Imported · no model' : '');
+  $('composer-hint').textContent = state.config.mode === 'demo'
+    ? (r?.metrics.mode === 'import'
+      ? 'Use Edit to change imported work. Demo revisions load fixed samples and do not interpret prompts.'
+      : 'Demo mode loads fixed content. Revision prompts are not interpreted.')
+    : 'Your brief and references are sent to the configured model.';
   $('breadcrumbs').innerHTML = `Projects <span>/</span> ${esc(p.title)}`;
   $('prompt').placeholder = r
     ? 'Describe the changes to this version…'
@@ -143,7 +167,7 @@ function drawWorkspace() {
     ? revisions
         .map(
           (v, i) =>
-            `<div class="chat-message user"><small>${v.origin === 'manual' ? 'MANUAL EDIT' : v.origin === 'restore' ? 'RESTORE' : 'YOUR BRIEF'}</small>${esc(v.prompt)}</div><div class="chat-message assistant"><small>${v.metrics.mode === 'demo' ? 'FIXED DEMONSTRATION' : 'REVISION ' + (i + 1)}</small>${v.metrics.mode === 'demo' ? 'Sample content loaded. Connect GLM to interpret your brief.' : 'A saved revision is ready to inspect.'}<div class="message-meta">${v.metrics.durationSeconds || 0}s · ${v.metrics.modelCalls || 0} model calls</div></div>`,
+            `<div class="chat-message user"><small>${v.origin === 'template' ? 'CURATED STARTER' : v.origin === 'copy' ? 'EXPLORATION COPY' : v.origin === 'manual' ? 'MANUAL EDIT' : v.origin === 'restore' ? 'RESTORE' : v.origin === 'import' ? 'IMPORTED BRIEF' : 'YOUR BRIEF'}</small>${esc(v.prompt)}</div><div class="chat-message assistant"><small>${v.metrics.mode === 'template' ? 'CURATED LAYOUT · NO MODEL' : v.metrics.mode === 'copy' ? 'COPIED DESIGN · NO MODEL' : v.metrics.mode === 'demo' ? 'FIXED DEMONSTRATION' : v.metrics.mode === 'import' ? 'IMPORTED ARTIFACT' : 'REVISION ' + (i + 1)}</small>${v.metrics.mode === 'demo' ? 'Sample content loaded. Connect GLM to interpret your brief.' : v.metrics.mode === 'import' ? 'Ready to edit and export. Imported work is excluded from GLM summaries.' : 'A saved revision is ready to inspect.'}<div class="message-meta">${v.metrics.durationSeconds || 0}s · ${v.metrics.modelCalls || 0} model calls</div></div>`,
         )
         .join('')
     : `<div class="chat-message assistant"><small>START HERE</small>Describe the work you need.<br><br>For a useful evaluation, include the facts the output must preserve and how you will use the exported result.${p.references.length ? `<br><br>${p.references.length} reference image(s) attached.` : ''}</div>`;
@@ -152,7 +176,7 @@ function drawWorkspace() {
   for (const id of ['evaluate-button', 'export-button', 'export-format']) $(id).disabled = !r;
   $('export-format').innerHTML = (
     p.kind === 'web'
-      ? ['html', 'json', 'pdf']
+      ? ['html', 'zip', 'json', 'pdf']
       : p.kind === 'slides'
         ? ['pptx', 'pdf', 'json', 'html']
         : ['docx', 'pdf', 'json', 'html']
@@ -166,6 +190,9 @@ function drawWorkspace() {
 function drawPreview() {
   const p = state.project,
     r = state.revision;
+  $('project-kind').textContent = names[p.kind] + (r.metrics.mode === 'import' ? ' · Imported · no model' : '');
+  if(p.kind === 'web' && window.FormaStudio) { window.FormaStudio.render(p,r,state.native); return; }
+  window.FormaStudio?.hide();
   $('preview-frame').src = `/api/projects/${p.id}/preview?revision=${r.id}`;
   $('desktop-view').hidden = p.kind !== 'web';
   $('mobile-view').hidden = p.kind !== 'web';
@@ -182,6 +209,8 @@ function drawPreview() {
     : '<div class="check-card"><h3>No rendered export yet</h3><p>Open Checks and choose Render exports. The renderer needs Chromium, LibreOffice, and Poppler, supplied in its Docker image.</p></div>';
 }
 function setTab(tab) {
+  if(sourceDirty()) { toast('Save your source edits before changing panels.'); return; }
+  if(tab !== state.tab && window.FormaStudio?.isDirty()) { toast('Save design or undo your changes before changing panels.'); return; }
   state.tab = tab;
   document
     .querySelectorAll('.tab')
@@ -196,14 +225,14 @@ function setTab(tab) {
 function inputField(label, value, path, multiline = false, code = false) {
   return `<label>${esc(label)}${multiline ? `<textarea data-field="${path}" rows="${code ? 12 : 3}" ${code ? 'class="code-editor" spellcheck="false"' : ''}>${esc(value)}</textarea>` : `<input data-field="${path}" value="${esc(value)}">`}</label>`;
 }
-function drawEditor() {
-  const a = structuredClone(state.revision.artifact);
+function drawEditor(value = state.revision.artifact) {
+  const a = structuredClone(value);
   state.editor = a;
   let html =
     inputField('Title', a.title, 'title') + inputField('Summary', a.summary, 'summary', true);
   if (a.kind === 'web')
     html +=
-      inputField('HTML body', a.html, 'html', true, true) +
+      (a.screens ? a.screens.map((s,i)=>`<section class="edit-block"><h3>${esc(s.name)}</h3>${inputField('Screen name',s.name,`screens.${i}.name`)}${inputField('HTML body',s.html,`screens.${i}.html`,true,true)}</section>`).join('') : inputField('HTML body', a.html, 'html', true, true)) +
       inputField('CSS', a.css, 'css', true, true);
   else if (a.kind === 'slides')
     html += a.slides
@@ -237,6 +266,7 @@ function collectEditor() {
         ? JSON.parse(el.value)
         : el.value;
   });
+  if(a.screens) a.html=a.screens[0].html;
   return a;
 }
 function drawHistory() {
@@ -251,8 +281,14 @@ function drawHistory() {
 }
 function drawChecks() {
   const m = state.revision.metrics;
+  const responsive = m.render?.screenMetrics;
+  const responsiveChecks = responsive?.length ? `<div class="check-card"><h3>Responsive screen checks</h3><p>Each saved screen is measured at 1280, 768 and 390 pixels. These checks do not cover every interaction state or certify accessibility.</p><div class="responsive-checks"><table><thead><tr><th>Screen</th><th>Desktop</th><th>Tablet</th><th>Mobile</th></tr></thead><tbody>${responsive.map(s => `<tr><th scope="row">${esc(s.name)}</th>${['desktop','tablet','mobile'].map(view => { const x=s[view]; if(!x)return '<td>Not checked</td>'; const issues=[x.overflow&&'Horizontal overflow',x.missingLabels&&`${x.missingLabels} table labels missing`,x.unnamedControls&&`${x.unnamedControls} unnamed controls`,x.brokenTargets&&`${x.brokenTargets} missing interaction targets`,x.inactiveButtons&&`${x.inactiveButtons} buttons without an action`,x.duplicateIds&&`${x.duplicateIds} duplicate IDs`].filter(Boolean); return `<td>${issues.length?issues.map(esc).join('<br>'):'No automated issues'}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div></div>` : '';
+  const reviewCoverage = m.review?.scope === 'content-only'
+    ? 'Content checked against the brief. Visual layout was not inspected.'
+    : `${m.review?.pagesReviewed || 0} of ${m.review?.pageCount || 0} captured pages/views reviewed.`;
   $('checks-panel').innerHTML =
-    `<div class="panel-intro"><h2>Evidence, with its limits.</h2><p>Model review can miss mistakes. Open the export and check facts and functionality yourself.</p></div><div class="metric-grid"><div><strong>${m.durationSeconds ?? '—'}<small>s</small></strong><span>Generation elapsed</span></div><div><strong>${m.modelCalls || 0}</strong><span>Model calls</span></div><div><strong>${m.outputTokens || 0}</strong><span>Reported output tokens</span></div></div><div class="check-card"><h3>Rendering</h3><p>${m.render ? esc(m.render.basis) + ' · ' + m.render.pageCount + ' page(s)' : 'No successful render is recorded for this revision.'}</p><button class="secondary" id="render-now">Render exports</button></div><div class="check-card"><h3>Model visual review</h3><p>${m.review ? `${esc(m.review.summary)}<br>${m.review.pagesReviewed} of ${m.review.pageCount} pages reviewed. ${m.review.refined ? 'One correction pass applied; the final result has not been independently approved.' : ''}` : m.mode === 'demo' ? 'Not run. Demo fixtures do not use a model.' : 'Not run or unavailable.'}</p>${m.review?.issues?.length ? '<ul>' + m.review.issues.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''}</div><div class="check-card"><h3>Items to inspect</h3><ul>${(m.warnings?.length ? m.warnings : ['No automated warning was recorded. This does not certify correctness.']).map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>`;
+    `<div class="panel-intro"><h2>Evidence, with its limits.</h2><p>Model review can miss mistakes. Open the export and check facts and functionality yourself.</p></div><div class="metric-grid"><div><strong>${m.durationSeconds ?? '—'}<small>s</small></strong><span>Generation elapsed</span></div><div><strong>${m.modelCalls || 0}</strong><span>Model calls</span></div><div><strong>${m.outputTokens || 0}</strong><span>Reported output tokens</span></div></div><div class="check-card"><h3>Rendering</h3><p>${m.render ? esc(m.render.basis) + ' · ' + m.render.pageCount + ' page(s)/view(s)' : 'No successful render is recorded for this revision.'}</p><button class="secondary" id="render-now">Render exports</button></div><div class="check-card"><h3>Model quality review</h3><p>${m.review ? `${esc(m.review.summary)}<br>${reviewCoverage} ${m.review.refined ? 'One correction pass applied; the final result has not been independently approved.' : ''}` : m.mode === 'demo' ? 'Not run. Demo fixtures do not use a model.' : 'Not run or unavailable.'}</p>${m.review?.issues?.length ? '<ul>' + m.review.issues.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ul>' : ''}</div><div class="check-card"><h3>Items to inspect</h3><ul>${(m.warnings?.length ? m.warnings : ['No automated warning was recorded. This does not certify correctness.']).map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>`;
+  $('checks-panel').insertAdjacentHTML('beforeend',responsiveChecks);
   $('render-now').onclick = safe(async () => {
     $('render-now').disabled = true;
     try {
@@ -270,9 +306,10 @@ function drawChecks() {
 function updateBusy(job) {
   const busy = job && ['queued', 'running'].includes(job.status);
   $('job-status').hidden = !busy;
-  $('generate-button').disabled = !!busy;
+  $('generate-button').disabled = !!busy || (state.config.mode === 'demo' && ['template','copy','import'].includes(state.revision?.metrics.mode));
   $('save-edit').disabled = !!busy;
   $('generate-button').innerHTML = (state.revision ? 'Revise' : 'Generate') + ' <span>↑</span>';
+  if (state.config.mode === 'demo' && ['template','copy','import'].includes(state.revision?.metrics.mode)) $('composer-hint').textContent='Edit this design with the canvas controls. Connect GLM to adapt it using a brief.';
   if (busy) $('job-stage').textContent = job.stage;
 }
 async function trackJob(jid) {
@@ -294,7 +331,10 @@ async function trackJob(jid) {
       state.tab = 'preview';
       drawWorkspace();
       toast('Revision saved. Inspect the result and record your evaluation.');
-    } else toast(j.error || j.stage);
+    } else {
+      if (!$('prompt').value) $('prompt').value = j.prompt;
+      toast(j.error || j.stage);
+    }
   } catch (e) {
     toast(e.message);
     state.poll = setTimeout(() => trackJob(jid), 3000);
@@ -346,6 +386,8 @@ $('login-form').onsubmit = async (e) => {
   }
 };
 $('logout').onclick = safe(async () => {
+  if(!leaveSource()) return;
+  if(window.FormaStudio && !window.FormaStudio.leave()) return;
   await api('/logout', 'POST', {});
   clearTimeout(state.poll);
   $('app').hidden = true;
@@ -362,6 +404,49 @@ $('nav-projects').onclick = safe(async () => {
 });
 $('nav-evaluation').onclick = safe(showEvaluation);
 $('new-project').onclick = () => openCreate();
+$('import-project').onclick = () => {
+  $('import-form').reset();
+  $('import-error').textContent = '';
+  $('import-dialog').showModal();
+};
+$('import-file').onchange = () => { $('import-error').textContent = ''; };
+$('import-form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('import-error').textContent = '';
+  $('import-submit').disabled = true;
+  try {
+    const file = $('import-file').files[0];
+    if (!file || file.size > 1000000) throw new Error('Choose a Forma JSON file up to 1 MB.');
+    let artifact;
+    try { artifact = JSON.parse((await file.text()).replace(/^\uFEFF/, '')); }
+    catch { throw new Error('This file is not valid JSON. Choose a Forma JSON export.'); }
+    const references = [];
+    for (let index = 0; index < 2; index++) {
+      const image = $('import-image-' + index).files[0];
+      if (!image) continue;
+      if (index !== references.length) throw new Error('Attach image 1 before image 2 to preserve the original slots.');
+      if (!['image/png', 'image/jpeg'].includes(image.type) || image.size > 3000000)
+        throw new Error('Use PNG or JPEG reference images up to 3 MB each.');
+      const data = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('The reference image could not be read.'));
+        reader.readAsDataURL(image);
+      });
+      references.push({ name: image.name, data });
+    }
+    const project = await api('/import', 'POST', { artifact, references, sourceBrief: $('import-brief').value });
+    $('import-dialog').close();
+    await loadProjects();
+    await openProject(project.id);
+    toast('Imported as a new project. No model was called.');
+  } catch (error) {
+    if ($('import-dialog').open) $('import-error').textContent = error.message;
+    else toast(error.message);
+  } finally {
+    $('import-submit').disabled = false;
+  }
+};
 $('project-search').oninput = drawProjects;
 document.addEventListener(
   'click',
@@ -376,6 +461,7 @@ document.addEventListener(
     if (tab) setTab(tab.dataset.tab);
     const view = e.target.closest('[data-view-revision]');
     if (view) {
+      if(window.FormaStudio && !window.FormaStudio.leave()) return;
       state.revision = await api(
         `/projects/${state.project.id}/revisions/${view.dataset.viewRevision}`,
       );
@@ -386,6 +472,7 @@ document.addEventListener(
     }
     const restore = e.target.closest('[data-restore]');
     if (restore) {
+      if(window.FormaStudio && !window.FormaStudio.leave()) return;
       await api(`/projects/${state.project.id}/restore`, 'POST', {
         revisionId: restore.dataset.restore,
       });
@@ -441,6 +528,8 @@ $('create-form').onsubmit = safe(async (e) => {
 });
 $('generate-form').onsubmit = safe(async (e) => {
   e.preventDefault();
+  if(sourceDirty()) throw new Error('Save your source edits before generating.');
+  window.FormaStudio?.guard();
   if (state.revision && state.revision.id !== state.project.current_id)
     throw new Error('Restore this historical revision before revising it.');
   $('generate-button').disabled = true;
@@ -461,6 +550,8 @@ $('cancel-job').onclick = safe(async () => {
 });
 $('export-button').onclick = safe(async () => {
   if (!state.revision) return;
+  if(sourceDirty()) throw new Error('Save your source edits before exporting.');
+  window.FormaStudio?.guard();
   const format = $('export-format').value;
   const res = await fetch(
     `/api/projects/${state.project.id}/export?revision=${state.revision.id}&format=${format}`,
@@ -488,15 +579,16 @@ $('native-view').onclick = () => {
   drawPreview();
 };
 $('apply-json').onclick = safe(async () => {
-  state.revision.artifact = JSON.parse($('artifact-json').value);
-  drawEditor();
+  drawEditor(JSON.parse($('artifact-json').value));
   toast('Loaded into the editor. Save a new revision to apply.');
 });
 $('save-edit').onclick = safe(async () => {
+  if($('artifact-json').value !== JSON.stringify(state.editor,null,2)) throw new Error('Apply your JSON changes to the editor before saving.');
   await api(`/projects/${state.project.id}/save`, 'POST', {
     baseId: state.revision.id,
     artifact: collectEditor(),
   });
+  state.editor=null;
   await openProject(state.project.id);
   await loadProjects();
   toast('Manual edit saved as a new revision.');
@@ -521,7 +613,7 @@ $('evaluate-form').onsubmit = safe(async (e) => {
     notes: $('evaluation-notes').value,
   });
   $('evaluate-dialog').close();
-  toast('Evaluation recorded. Demo results stay separate from GLM results.');
+  toast('Evaluation recorded. Demo and imported results stay separate from GLM results.');
 });
 $('test-connection').onclick = safe(async () => {
   $('test-connection').disabled = true;
@@ -533,4 +625,4 @@ $('test-connection').onclick = safe(async () => {
     $('test-connection').disabled = false;
   }
 });
-boot().catch(() => {});
+addEventListener('DOMContentLoaded', () => boot().catch(() => {}), { once: true });

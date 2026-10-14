@@ -7,57 +7,12 @@ const { pathToFileURL } = require('node:url');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const exec = promisify(execFile);
-const { chromium } = require('playwright');
 const { body, send } = require('./lib/http.cjs');
 const token = process.env.RENDER_TOKEN;
 if (!token || token.length < 16)
   throw new Error('RENDER_TOKEN must contain at least 16 characters.');
 let active = 0;
-async function browserRender(payload) {
-  if (typeof payload.html !== 'string' || payload.html.length > 9000000)
-    throw new Error('Invalid HTML render request.');
-  // This worker renders only application-sanitized markup. It never loads external sites.
-  const browser = await chromium.launch({
-    headless: true,
-    ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}),
-    args: ['--disable-dev-shm-usage'],
-  });
-  let timer;
-  try {
-    timer = setTimeout(() => browser.close().catch(() => {}), 45000);
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-      serviceWorkers: 'block',
-      acceptDownloads: false,
-    });
-    await context.route('**/*', (r) => r.abort());
-    const page = await context.newPage();
-    const errors = [];
-    page.on('pageerror', (e) => errors.push(e.message.slice(0, 300)));
-    await page.setContent(payload.html, { waitUntil: 'load', timeout: 15000 });
-    await page.evaluate(() => document.fonts.ready);
-    const metrics = await page.evaluate(() => ({
-      horizontalOverflow: document.documentElement.scrollWidth > innerWidth + 2,
-      height: document.documentElement.scrollHeight,
-    }));
-    const png = await page.screenshot({ fullPage: false });
-    const pdf = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '14mm', right: '14mm', bottom: '14mm', left: '14mm' },
-    });
-    return {
-      screenshots: [png.toString('base64')],
-      pdf: pdf.toString('base64'),
-      pageCount: 1,
-      basis: 'browser preview; first viewport inspected',
-      metrics: { ...metrics, errors },
-    };
-  } finally {
-    clearTimeout(timer);
-    await browser.close();
-  }
-}
+const { browserRender } = require('./lib/browser-render.cjs');
 async function officeRender(payload) {
   if (
     !['pptx', 'docx'].includes(payload.extension) ||
@@ -70,6 +25,8 @@ async function officeRender(payload) {
     const input = path.join(dir, `artifact.${payload.extension}`);
     await fs.writeFile(input, Buffer.from(payload.file, 'base64'));
     const lo = process.env.LIBREOFFICE_PATH || 'soffice';
+    let converterVersion = 'Version not reported';
+    try { converterVersion = (await exec(lo, ['--version'], {timeout:10000,windowsHide:true,maxBuffer:10000})).stdout.trim().slice(0,160); } catch {}
     await exec(
       lo,
       [
@@ -116,8 +73,8 @@ async function officeRender(payload) {
       pdf: pdf.toString('base64'),
       screenshots,
       pageCount,
-      basis: 'native Office export rendered by LibreOffice',
-      metrics: { renderedPages: screenshots.length, truncated: pageCount > screenshots.length },
+      basis: 'Office export rendered by the configured converter: ' + converterVersion,
+      metrics: { converterVersion, renderedPages: screenshots.length, truncated: pageCount > screenshots.length },
     };
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

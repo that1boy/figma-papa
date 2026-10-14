@@ -7,10 +7,14 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { body, send } = require('./lib/http.cjs');
 const S = require('./lib/schema.cjs');
+const { prepareImport } = require('./lib/import.cjs');
 const M = require('./lib/model.cjs');
+const { initializeHistory, briefHistory } = require('./lib/history.cjs');
 const { demo } = require('./lib/demo.cjs');
 const { pageHTML, CSP, warnings } = require('./lib/presentation.cjs');
 const { exportPPTX, exportDOCX } = require('./lib/exports.cjs');
+const { initializeStudio, projectStyle, studioRoute } = require('./lib/studio-routes.cjs');
+const { handoff } = require('./lib/handoff.cjs');
 const cfg = M.configFromEnv();
 const dataDir = path.resolve(process.env.DATA_DIR || './data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -42,6 +46,8 @@ CREATE TABLE IF NOT EXISTS revisions(id TEXT PRIMARY KEY,project_id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),prompt TEXT NOT NULL,review INTEGER NOT NULL,base_id TEXT,status TEXT NOT NULL,stage TEXT NOT NULL,error TEXT,result_id TEXT,created TEXT NOT NULL,updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS evaluations(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES revisions(id),data TEXT NOT NULL,created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS revisions_project ON revisions(project_id); CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);`);
+initializeHistory(db);
+initializeStudio(db);
 db.prepare(
   "UPDATE jobs SET status='failed',stage='Interrupted by application restart',error='This job did not finish before the application restarted. Submit it again.',updated=? WHERE status IN ('queued','running')",
 ).run(new Date().toISOString());
@@ -50,7 +56,7 @@ const now = () => new Date().toISOString(),
 function project(pid) {
   const p = db.prepare('SELECT * FROM projects WHERE id=?').get(pid);
   if (!p) throw Object.assign(new Error('Project not found.'), { status: 404 });
-  return { ...p, references: JSON.parse(p.refs) };
+  return { ...p, references: JSON.parse(p.refs), designSystem: projectStyle(db,p.id) };
 }
 function revision(rid, pid) {
   const r = db.prepare('SELECT * FROM revisions WHERE id=? AND project_id=?').get(rid, pid);
@@ -70,13 +76,13 @@ function assertIdle(pid) {
     );
 }
 // Transactionally insert the artifact and advance the current revision.
-function commit(p, a, prompt, origin, metrics, rid = id()) {
+function commit(p, a, prompt, origin, metrics, rid = id(), parentId = p.current_id) {
   const date = now();
   db.exec('BEGIN IMMEDIATE');
   try {
     db.prepare(
-      'INSERT INTO revisions(id,project_id,artifact,prompt,origin,metrics,created) VALUES(?,?,?,?,?,?,?)',
-    ).run(rid, p.id, JSON.stringify(a), prompt, origin, JSON.stringify(metrics), date);
+      'INSERT INTO revisions(id,project_id,artifact,prompt,origin,metrics,created,parent_id) VALUES(?,?,?,?,?,?,?,?)',
+    ).run(rid, p.id, JSON.stringify(a), prompt, origin, JSON.stringify(metrics), date, parentId || null);
     db.prepare('UPDATE projects SET current_id=?,title=?,updated=? WHERE id=?').run(
       rid,
       a.title,
@@ -169,6 +175,9 @@ async function runJob(job) {
   try {
     const p = project(job.project_id),
       current = job.base_id ? revision(job.base_id, p.id).artifact : null;
+    p.history = briefHistory(db, p.id, job.base_id);
+    metrics.sourceBriefCount = p.history.briefs.length;
+    if (p.history.omitted) metrics.warnings.push(`${p.history.omitted} older revision briefs exceeded the context limit. The original brief and latest instructions were retained; inspect factual continuity.`);
     stage(
       'generating',
       cfg.mode === 'demo' ? 'Loading fixed demonstration' : 'Generating with GLM',
@@ -191,47 +200,63 @@ async function runJob(job) {
         'Rendering unavailable. Browser preview is available, but native export layout and visual review remain unverified.',
       );
     }
-    if (render && job.review && cfg.mode === 'glm') {
-      stage('reviewing', 'GLM is inspecting the rendered pages');
+    if (job.review && cfg.mode === 'glm') {
+      stage('reviewing', render ? 'Checking content and rendered output' : 'Checking content against the brief');
       try {
-        metrics.review = await M.critique(cfg, p, job.prompt, a, render, signal, metrics);
+        metrics.review = await M.critique(cfg, p, job.prompt, a, render, signal, metrics, current);
         if (metrics.review.issues.length) {
-          stage('refining', 'Applying one visual correction pass');
+          stage('refining', 'Applying one quality correction pass');
           const refined = await M.generate(
             cfg,
             p,
-            `Original task: ${job.prompt}\nCorrect these observed visual issues, preserving facts and unrelated content: ${metrics.review.issues.join('; ')}`,
+            `Current user request: ${job.prompt}\nCorrect these review findings only when supported by the supplied briefs. Findings are reviewer suggestions, not new source facts. Preserve unaffected facts, unknowns, structure and styling: ${JSON.stringify(metrics.review.issues)}`,
             a,
             signal,
             metrics,
             stage,
           );
-          const refinedRender = await renderArtifact(refined, p.references, signal);
+          let refinedRender;
+          try {
+            refinedRender = await renderArtifact(refined, p.references, signal);
+          } catch (e) {
+            if (signal.aborted || render) throw e;
+          }
           a = refined;
           render = refinedRender;
           metrics.review.refined = true;
           metrics.warnings.push(
-            'One visual correction pass completed. The corrected result still needs human review.',
+            'One quality correction pass completed. The corrected result still needs human review.',
           );
         }
       } catch (e) {
         if (signal.aborted) throw e;
         metrics.warnings.push(
-          'Visual review or correction could not finish. The last renderable artifact was retained.',
+          'Quality review or correction could not finish. The previous generated artifact was retained.',
         );
       }
     }
     if (signal.aborted) throw new Error('Cancelled.');
     metrics.warnings.push(...warnings(a, p.references));
     if (render) {
+      metrics.warnings = metrics.warnings.filter((w) => !w.startsWith('Rendering unavailable'));
       metrics.render = {
         pageCount: render.pageCount,
         screenshots: render.screenshots.length,
         basis: render.basis,
+        views: render.views || [],
         ...render.metrics,
       };
       if (render.metrics?.horizontalOverflow)
         metrics.warnings.push('The browser detected horizontal overflow.');
+      if (render.metrics?.mobileHorizontalOverflow)
+        metrics.warnings.push('The mobile browser detected horizontal overflow at 390 px.');
+      if (render.metrics?.mobileMissingLabels)
+        metrics.warnings.push('The mobile table hides column headers and has cells without visible field labels.');
+      if (render.metrics?.tabletHorizontalOverflow) metrics.warnings.push('The tablet browser detected horizontal overflow at 768 px.');
+      if (render.metrics?.unnamedControls) metrics.warnings.push(`${render.metrics.unnamedControls} visible controls may lack accessible names.`);
+      if (render.metrics?.brokenTargets) metrics.warnings.push(`${render.metrics.brokenTargets} prototype interactions reference a missing target.`);
+      if (render.metrics?.inactiveButtons) metrics.warnings.push(`${render.metrics.inactiveButtons} buttons have no supported prototype action. Check whether these controls should work.`);
+      if (render.metrics?.duplicateIds) metrics.warnings.push('Duplicate HTML IDs were found within a screen. Check labels and interaction targets.');
     }
     metrics.durationSeconds = Math.round((Date.now() - start) / 1000);
     const rid = id();
@@ -340,12 +365,14 @@ const server = http.createServer(async (req, res) => {
       });
     if (parts[0] === 'api') {
       if (!signedIn(req)) return send(res, 401, { error: 'Sign in to the pilot workspace.' });
+      if(await studioRoute(req,res,url,{db,id,now,project,revision,assertIdle})) return;
       if (url.pathname === '/api/config')
         return send(res, 200, {
           mode: cfg.mode,
           model: cfg.model,
           maxJobs,
           renderConfigured: !!process.env.RENDER_URL,
+          version: require('./package.json').version,
         });
       if (url.pathname === '/api/model/test' && req.method === 'POST') {
         if (cfg.mode === 'demo')
@@ -395,6 +422,28 @@ const server = http.createServer(async (req, res) => {
           date,
           date,
         );
+        return send(res, 201, { id: pid });
+      }
+      if (url.pathname === '/api/import' && req.method === 'POST') {
+        const { artifact: a, references, sourceBrief } = prepareImport(await body(req));
+        const pid = id(), rid = id(), date = now();
+        const metrics = {
+          mode: 'import', durationSeconds: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0,
+          warnings: ['Imported artifact: source and model quality are unverified.', ...warnings(a, references)],
+        };
+        // The file supplies content only. IDs, provenance and metrics are owned by Forma.
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?,?,?)').run(
+            pid, a.kind, a.title, '', JSON.stringify(references), rid, date, date,
+          );
+          db.prepare('INSERT INTO revisions(id,project_id,artifact,prompt,origin,metrics,created,parent_id) VALUES(?,?,?,?,?,?,?,?)')
+            .run(rid, pid, JSON.stringify(a), sourceBrief, 'import', JSON.stringify(metrics), date, null);
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
         return send(res, 201, { id: pid });
       }
       if (parts[1] === 'projects' && parts[2]) {
@@ -474,7 +523,7 @@ const server = http.createServer(async (req, res) => {
             ...r.metrics,
             render: null,
             warnings: ['Restored content. Render again to regenerate native previews.'],
-          });
+          }, id(), r.id);
           return send(res, 201, { id: rid });
         }
         if (['preview', 'export', 'screenshot'].includes(parts[3])) {
@@ -486,7 +535,7 @@ const server = http.createServer(async (req, res) => {
             });
           if (parts[3] === 'screenshot') {
             const i = Number(url.searchParams.get('page') || 0);
-            if (!Number.isInteger(i) || i < 0 || i > 15) S.fail('Invalid page.');
+            if (!Number.isInteger(i) || i < 0 || i > 63) S.fail('Invalid page.');
             const file = path.join(dataDir, 'renders', `${r.id}-${i}.png`);
             if (!fs.existsSync(file))
               return send(res, 404, { error: 'No rendered screenshot is available.' });
@@ -500,6 +549,9 @@ const server = http.createServer(async (req, res) => {
           } else if (format === 'html') {
             bytes = pageHTML(r.artifact, p.references);
             type = 'text/html; charset=utf-8';
+          } else if (format === 'zip' && p.kind === 'web') {
+            bytes=handoff(p,r,db.prepare('SELECT * FROM design_notes WHERE revision_id=? ORDER BY created').all(r.id),briefHistory(db,p.id,r.id));
+            type='application/zip';
           } else if (format === 'pptx' && p.kind === 'slides') {
             bytes = await exportPPTX(r.artifact, p.references);
             type = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
@@ -534,6 +586,7 @@ const server = http.createServer(async (req, res) => {
             pageCount: render.pageCount,
             screenshots: render.screenshots.length,
             basis: render.basis,
+            views: render.views || [],
             ...render.metrics,
           };
           r.metrics.warnings = (r.metrics.warnings || []).filter(
@@ -635,7 +688,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 404, { error: 'API route not found.' });
     }
     if (req.method !== 'GET') return send(res, 405, { error: 'Method not allowed.' });
-    const file = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css' }[
+    const file = { '/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/studio.js':'studio.js', '/studio.css':'studio.css' }[
       url.pathname
     ];
     if (!file) return send(res, 404, { error: 'Not found.' });

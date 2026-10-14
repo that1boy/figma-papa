@@ -34,6 +34,32 @@ test('web sanitization blocks executable markup and network resources', () => {
     assert.throws(() => S.safeCSS(css));
   assert.equal(S.safeCSS('main > p { color: red }'), 'main > p { color: red }');
 });
+test('web sanitization retains semantic metadata and responsive table labels', () => {
+  const html = S.safeHTML(
+    '<main><dl class="meta"><dt>Owner</dt><dd>IT Operations</dd></dl>' +
+      '<table><tr><th data-label="Field">Owner</th><td data-label="Owner">Asha</td></tr></table></main>',
+  );
+  assert.match(html, /<dl class="meta"><dt>Owner<\/dt><dd>IT Operations<\/dd><\/dl>/);
+  assert.match(html, /<td data-label="Owner">Asha<\/td>/);
+  assert.match(html, /<th data-label="Field">Owner<\/th>/);
+  const hostile = S.safeHTML(
+    '<dl onclick="alert(1)"><dt>Owner</dt><dd style="background:url(http://internal)">Team</dd></dl>',
+  );
+  assert.doesNotMatch(hostile, /onclick|style=|http:/);
+});
+test('full-document web output drops head content without losing body controls', () => {
+  const html = S.safeHTML(
+    '<!doctype html><html><head><title>Metadata-only title</title>' +
+      '<style>body{color:red}</style><script>alert(1)</script></head><body>' +
+      '<main><h1>Visible title</h1><label for="notes">Notes</label>' +
+      '<textarea id="notes">Keep these notes</textarea><select><option selected>Keep option</option></select>' +
+      '</main></body></html>',
+  );
+  assert.doesNotMatch(html, /Metadata-only|body\{|alert\(|<head|<title|<html|<body/);
+  assert.match(html, /<h1>Visible title<\/h1>/);
+  assert.match(html, /<textarea id="notes">Keep these notes<\/textarea>/);
+  assert.match(html, /<option selected>Keep option<\/option>/);
+});
 test('schema refuses malformed content rather than silently making a demo', () => {
   assert.throws(() => S.artifact({ ...demo('slides'), slides: [] }, 'slides'));
   assert.throws(() => S.artifact(demo('web'), 'document'));

@@ -3,8 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Forma — Design pilot</title>
+    <title>Forma — Design studio</title>
     <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/studio.css" />
   </head>
   <body>
     <div id="login" class="login-screen">
@@ -28,11 +29,12 @@
     </div>
     <div id="app" hidden>
       <aside class="sidebar">
-        <a href="#" class="brand" id="brand-home"
+        <a href="#" class="brand" id="brand-home" aria-label="Forma home"
           ><span class="brandmark small">f<span>●</span></span
-          ><span>forma<small>DESIGN PILOT</small></span></a
+          ><span>forma<small>DESIGN STUDIO</small></span></a
         >
-        <button class="primary new-button" id="new-project">＋ <span>New project</span></button>
+        <button class="primary new-button" id="new-project" aria-label="New project" title="New project">＋ <span>New project</span></button>
+        <button class="secondary" id="import-project" aria-label="Import Forma JSON" title="Import Forma JSON">↥ <span>Import Forma JSON</span></button>
         <nav aria-label="Main navigation">
           <button id="nav-projects" class="nav-item active"><span>▦</span> Projects</button
           ><button id="nav-evaluation" class="nav-item"><span>◴</span> Evaluation</button>
@@ -56,11 +58,10 @@
         <section id="library" class="library">
           <div class="hero">
             <div>
-              <p class="eyebrow">A PLACE TO MAKE IDEAS TANGIBLE</p>
+              <p class="eyebrow">FROM FIRST IDEA TO A CLICKABLE FLOW</p>
               <h1>What will you<br />create today?</h1>
               <p>
-                Turn a brief into a prototype, presentation, or document.<br />Refine it. Export it.
-                Decide if it earns a place in your work.
+                Design screens that connect. Refine the details.<br />Build a prototype your team can use and review.
               </p>
             </div>
             <div class="hero-note">
@@ -83,8 +84,8 @@
               </div>
               <div class="format-copy">
                 <span class="format-number">01 / INTERACTIVE</span>
-                <h2>Web prototype <span>↗</span></h2>
-                <p>Explore a screen, flow, or internal tool.</p>
+                <h2>UI / UX design <span>↗</span></h2>
+                <p>Websites, app screens and clickable flows.</p>
               </div>
             </button>
             <button class="format-card" data-create="slides">
@@ -127,7 +128,7 @@
             <span>↗</span>
             <p>
               <strong>Useful is the goal.</strong> Evaluate finished work, including the time you
-              spend correcting it. Demo fixtures are excluded from GLM evaluation summaries.
+              spend correcting it. Demo fixtures and imports are excluded from GLM evaluation summaries.
             </p>
           </div>
         </section>
@@ -152,8 +153,8 @@
               ></textarea>
               <div class="composer-options">
                 <label
-                  ><input id="review-checkbox" type="checkbox" checked /> Inspect rendered
-                  output</label
+                  ><input id="review-checkbox" type="checkbox" checked /> Review content
+                    and layout</label
                 >
               </div>
               <button class="primary" id="generate-button" type="submit">
@@ -231,7 +232,7 @@
           </div>
           <p class="evaluation-description">
             These summaries include GLM-origin work only. Time includes waiting, editing, and
-            cleanup as entered by the reviewer. Results are grouped by format.
+            cleanup as entered by the reviewer. Demo fixtures and imports are excluded. Results are grouped by format.
           </p>
           <div id="evaluation-summary" class="evaluation-summary"></div>
           <div class="table-wrap">
@@ -251,6 +252,22 @@
         </section>
       </main>
     </div>
+    <dialog id="import-dialog">
+      <form id="import-form">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">CONTINUE EXISTING WORK</span><h2>Import Forma JSON</h2></div>
+          <button type="button" class="icon-button" data-close="import-dialog" aria-label="Close">×</button>
+        </div>
+        <p>Open a Forma JSON export as a new project. Edit, preview and export without a model connection.</p>
+        <label>Forma JSON file (up to 1 MB)<input id="import-file" type="file" accept=".json,application/json" required /></label>
+        <label>Original brief (optional)<textarea id="import-brief" rows="3" maxlength="24000" placeholder="Source facts and constraints to keep for future revisions"></textarea></label>
+        <label>Reference image 1 (if used)<input id="import-image-0" type="file" accept="image/png,image/jpeg" /></label>
+        <label>Reference image 2 (if used)<input id="import-image-1" type="file" accept="image/png,image/jpeg" /></label>
+        <p class="muted">JSON exports contain content, not images or revision history. Reattach original PNG/JPEG images in their original slots (up to 3 MB each). Imports are labelled separately from GLM results.</p>
+        <p id="import-error" class="error" role="alert"></p>
+        <button class="primary" id="import-submit" type="submit">Import as new project</button>
+      </form>
+    </dialog>
     <dialog id="create-dialog">
       <form id="create-form">
         <div class="dialog-heading">
@@ -264,7 +281,7 @@
         </div>
         <label
           >Format<select id="create-kind">
-            <option value="web">Web prototype</option>
+            <option value="web">UI / UX prototype</option>
             <option value="slides">Presentation</option>
             <option value="document">Document</option>
           </select></label
@@ -355,5 +372,6 @@ Use a restrained violet accent, neutral backgrounds, clear typography, and gener
     </dialog>
     <div id="toast" role="status" class="toast" hidden></div>
     <script src="/app.js"></script>
+    <script src="/studio.js"></script>
   </body>
 </html>

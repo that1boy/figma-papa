@@ -1,8 +1,8 @@
 {
   "name": "glm-design-pilot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "An internal design evaluation studio for a local GLM endpoint",
+  "description": "An internal GLM-backed UI and UX design studio",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -10,8 +10,9 @@
     "start": "node --env-file-if-exists=.env server.cjs",
     "renderer": "node --env-file-if-exists=.env renderer.cjs",
     "test": "node --test test/*.test.cjs",
-    "test:browser": "node test/browser.cjs",
-    "test:docker": "node test/docker-smoke.cjs"
+    "test:browser": "node test/browser.cjs && node test/studio-browser.cjs",
+    "test:docker": "node test/docker-smoke.cjs",
+    "test:studio": "node test/studio-browser.cjs"
   },
   "dependencies": {
     "docx": "9.6.1",

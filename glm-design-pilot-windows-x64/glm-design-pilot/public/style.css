@@ -234,7 +234,15 @@ small,
   justify-content: flex-start;
   gap: 18px;
   width: 100%;
+  margin-bottom: 10px;
+}
+#import-project {
+  width: 100%;
   margin-bottom: 25px;
+}
+#import-dialog p {
+  font-size: 12px;
+  line-height: 1.6;
 }
 nav {
   display: flex;
@@ -1275,6 +1283,7 @@ dialog .primary {
   }
   .brand > span:last-child,
   .new-button span,
+  #import-project span,
   .sidebar-section,
   .recent-projects,
   .sidebar-bottom,

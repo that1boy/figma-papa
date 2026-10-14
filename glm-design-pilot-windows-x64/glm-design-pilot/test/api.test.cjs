@@ -170,7 +170,7 @@ test('GLM adapter sends references, repairs invalid output, and never falls back
       references: [{ name: 'ref.png', data: png }],
     })
   ).data;
-  let job = await api(`/projects/${p.id}/generate`, 'POST', { prompt: 'Use the reference.' });
+  let job = await api(`/projects/${p.id}/generate`, 'POST', { prompt: 'Use the reference.', review: false });
   let done = await waitJob(api, job.data.id);
   assert.equal(done.status, 'complete', done.error);
   assert.equal(requests.length, 2);

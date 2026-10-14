@@ -1,0 +1,8 @@
+node_modules
+runtime
+data
+test-results
+.env
+.git
+*.cmd
+Forma.exe
