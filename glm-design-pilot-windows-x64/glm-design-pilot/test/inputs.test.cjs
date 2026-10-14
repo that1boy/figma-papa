@@ -206,6 +206,12 @@ test('DOCX: mc:Fallback, w:tabs stops and change history are skipped; unknown en
   assert.equal(r.text, 'plain &lt; &xxe; AB\nCHOICE\nfield result');
 });
 
+test('DOCX: CDATA, comments, processing instructions and stray markup in text', async () => {
+  const body = '<!-- <w:t>comment</w:t> --><w:p><w:r><w:t><![CDATA[a<b & c]]></w:t><?pi <w:t>no</w:t>?><w:t> 1 < 2 </w:t><w:t>&#0;&#xD800;&#x1F600;</w:t></w:r></w:p></w:nope><w:p><w:r><w:t>second</w:t></w:r>';
+  const r = await extractSource({ name: 'c.docx', data: wordZip(body) });
+  assert.equal(r.text, 'a<b & c 1 < 2 \ufffd\ufffd\u{1F600}\nsecond');
+});
+
 test('DOCX: DTDs are refused (no entity expansion, no XXE)', async () => {
   const xml = `<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;"><!ENTITY xxe SYSTEM "file:///etc/passwd">]><w:document ${W}><w:body><w:p><w:r><w:t>&lol2; &xxe;</w:t></w:r></w:p></w:body></w:document>`;
   const z = buildZip([{ name: '_rels/.rels', data: ROOT_RELS('word/document.xml') }, { name: 'word/document.xml', data: xml }]);
@@ -826,11 +832,25 @@ test('extractSource: hostile text inputs stay fast', async () => {
     { name: 'a.html', data: Buffer.from('<p style="' + ' '.repeat(2 * 1024 * 1024) + '">x</p>') },
     { name: 'a.json', data: Buffer.from('['.repeat(500000)) },
     { name: 'a.docx', data: wordZip('<w:p a="' + ' '.repeat(3 * 1024 * 1024) + '"><w:r><w:t>x</w:t></w:r></w:p>' + '<w:tbl>'.repeat(50000)) },
+    { name: 'deep.docx', data: wordZip('<w:p><w:r><w:t>deep</w:t></w:r>'.repeat(400000)) },
+    { name: 'stray.docx', data: wordZip('<w:tbl>'.repeat(300) + '</w:x>'.repeat(3000000) + '<w:p><w:r><w:t>end</w:t></w:r></w:p>') },
+    { name: 'lt.docx', data: wordZip('< '.repeat(3000000) + '>' + '</ '.repeat(1000000) + '>' + '<a b="'.repeat(100000)) },
+    { name: 'attrs.docx', data: wordZip('<w:p><w:pPr><w:pStyle ' + 'a'.repeat(4 * 1024 * 1024) + ' w:val="Heading1"/></w:pPr><w:r><w:t>h</w:t></w:r></w:p>') },
+    { name: 'sld.pptx', data: buildZip([
+      { name: 'ppt/presentation.xml', data: '<p:presentation xmlns:p="p"/>' },
+      { name: 'ppt/slides/slide1.xml', data: '<p:sld xmlns:p="p" xmlns:a="a"><p:graphicFrame><a:tbl>' + '<a:tr><a:tc><a:txBody><a:p><a:r><a:t>c</a:t></a:r></a:p></a:txBody></a:tc></a:tr>'.repeat(300000) + '</a:tbl></p:graphicFrame>' + '<p:sp>'.repeat(200000) + '</p:sld>' },
+    ]) },
+    { name: 'ids.pptx', data: buildZip([
+      { name: 'ppt/presentation.xml', data: '<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst>' + '<p:sldId id="1" r:id="rId1"/>'.repeat(300000) + '</p:sldIdLst></p:presentation>' },
+      { name: 'ppt/_rels/presentation.xml.rels', data: '<Relationships>' + Array.from({ length: 6000 }, (_, i) => `<Relationship Id="rId${i}" Type="x/slide" Target="slides/slide${i}.xml"/>`).join('') + '</Relationships>' },
+      { name: 'ppt/slides/slide1.xml', data: '<p:sld xmlns:p="p" xmlns:a="a"><p:sp><p:txBody><a:p><a:r><a:t>one</a:t></a:r></a:p></p:txBody></p:sp></p:sld>' },
+    ]) },
   ];
   for (const input of inputs) {
     const start = process.hrtime.bigint();
     try { await extractSource(input); } catch (e) { assert.equal(e.status, 400, e.stack); }
     const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    if (process.env.FORMA_TIMING) console.log(input.name, ms.toFixed(0));
     assert.ok(ms < 4000, `${ms.toFixed(0)} ms for ${input.name}`);
   }
 });

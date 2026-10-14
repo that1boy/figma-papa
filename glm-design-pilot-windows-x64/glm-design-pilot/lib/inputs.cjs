@@ -1,7 +1,8 @@
 'use strict';
 // Source text extraction (ENGINE-SPEC section 6). Every byte is untrusted: sizes are checked before any work,
-// ZIP packages are vetted from the central directory and then inflated against a shared byte budget, and XML is
-// tokenised by htmlparser2 in xmlMode (only the five predefined and numeric entities decode; DTDs are refused).
+// ZIP packages are vetted from the central directory and then inflated against a shared byte budget, OOXML parts
+// are read by a small linear XML tokenizer (only the five predefined and numeric entities decode; DTDs are refused),
+// HTML goes through htmlparser2 with a depth cap, and every collector stops once it has enough text.
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -12,7 +13,7 @@ const { Parser } = require('htmlparser2');
 
 const LIMITS = Object.freeze({
   bytes: 15 * 1024 * 1024, chars: 60000, entries: 2000, unzipped: 80 * 1024 * 1024,
-  rows: 200, cols: 30, cell: 1000, slides: 1000, pdfPages: 100, pdfTimeout: 60000,
+  rows: 200, cols: 30, cell: 1000, slides: 1000, sheetBytes: 16 * 1024 * 1024, pdfPages: 100, pdfTimeout: 60000,
 });
 const LABEL = { docx: 'DOCX', pptx: 'PPTX', xlsx: 'XLSX', csv: 'CSV', tsv: 'TSV', txt: 'Text', md: 'Markdown', json: 'JSON', html: 'HTML', pdf: 'PDF' };
 const EXT = {
@@ -44,6 +45,7 @@ function rid(tag) {
 // C0/C1 controls (except tab and newline), BOMs, zero-width space and bidi embeddings/overrides/isolates.
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b\u202a-\u202e\u2066-\u2069\ufeff\ufffe\uffff]/g;
 const cellText = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, LIMITS.cell);
+const ENOUGH = LIMITS.chars * 2; // per paragraph, table or slide: more than this can never reach the output
 
 function cleanName(name) {
   let s = typeof name === 'string' ? name.slice(-1000) : '';
@@ -262,7 +264,9 @@ function scanZip(buf) {
   return { entries: n, size: total };
 }
 
-function inflate(file, budget) {
+// Inflates one entry against the shared budget (hard error). With soft, stops quietly after that many bytes and
+// returns the prefix (used for worksheets, where only the first rows matter).
+function inflate(file, budget, soft = Infinity) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0, done = false, h;
@@ -272,6 +276,7 @@ function inflate(file, budget) {
       if (done) return;
       size += c.length;
       if (size > budget.left) { h.pause(); stop(bad(`The file expands to more than ${LIMITS.unzipped / 1048576} MB and was rejected.`)); }
+      else if (size > soft) { h.pause(); done = true; chunks.push(c); budget.left -= size; resolve(Object.assign(Buffer.concat(chunks, size), { partial: true })); }
       else chunks.push(c);
     })
       .on('error', () => stop(bad(`The file ${DAMAGED}`)))
@@ -298,6 +303,12 @@ async function openZip(buf, name) {
     async read(n) {
       const f = typeof n === 'string' ? files.get(n.toLowerCase()) : null;
       return f ? decodeXml(await inflate(f, budget)) : null;
+    },
+    async prefix(n, soft) {
+      const f = typeof n === 'string' ? files.get(n.toLowerCase()) : null;
+      if (!f) return null;
+      const buf = await inflate(f, budget, soft);
+      return { xml: decodeXml(buf), partial: !!buf.partial };
     },
   };
 }
@@ -337,17 +348,17 @@ function tableStack() {
   const top = () => st[st.length - 1];
   return {
     get depth() { return st.length; },
-    open() { st.push({ rows: [], row: null, cell: null }); },
+    open() { st.push({ rows: [], row: null, cell: null, size: 0 }); },
     row() { if (top()) top().row = []; },
     cell() { if (top()) top().cell = []; },
-    text(s) { const t = top(); if (t && t.cell) t.cell.push(s); },
+    text(s) { const t = top(); if (t && t.cell && t.size < ENOUGH) { t.cell.push(s); t.size += s.length; } },
     endCell() { const t = top(); if (t && t.cell && t.row) t.row.push(cellText(t.cell.join(' '))); if (t) t.cell = null; },
     endRow() { const t = top(); if (t && t.row) { if (t.row.some(Boolean)) t.rows.push(t.row); t.row = null; } },
     close() {
       const t = st.pop();
       if (!t) return null;
       const parent = top();
-      if (parent) { if (parent.cell) parent.cell.push(t.rows.map((r) => r.join(' ')).join(' ')); return null; }
+      if (parent) { if (parent.cell && parent.size < ENOUGH) { const s = t.rows.map((r) => r.join(' ')).join(' '); parent.cell.push(s); parent.size += s.length; } return null; }
       return t.rows.map((r) => r.join('\t'));
     },
   };
@@ -452,7 +463,7 @@ async function readDocx(z, main) {
       }
       if (!ok) { stopped = true; h.stop(); }
     },
-    text(t) { if (!skip && inT && p()) p().text += t; },
+    text(t) { const q = p(); if (!skip && inT && q && q.text.length < ENOUGH) q.text += t; },
   };
   walkXml(xml, h);
   return { text: out.lines.join('\n'), details: tables ? [plural(tables, 'table')] : [], stopped };
@@ -464,8 +475,8 @@ const PPTX_NOISE = new Set(['sldNum', 'dt', 'ftr', 'hdr', 'sldImg']);
 
 function drawingText(xml) {
   const shapes = [], stack = [], tbl = tableStack(), loose = { ph: null, lines: [] };
-  let skip = 0, inT = 0, para = null, hidden = false;
-  walkXml(xml, {
+  let skip = 0, inT = 0, para = null, hidden = false, size = 0;
+  const h = {
     open(name, a) {
       if (skip) { skip++; return; }
       const n = local(name);
@@ -492,33 +503,38 @@ function drawingText(xml) {
           if (!para) break;
           const body = para.text.trim();
           if (tbl.depth) { if (body) tbl.text(body); }
-          else if (body) shape.lines.push('  '.repeat(para.lvl) + body);
+          else if (body) { shape.lines.push('  '.repeat(para.lvl) + body); if ((size += body.length) > ENOUGH) h.stop(); }
           para = null;
           break;
         }
         case 'tc': tbl.endCell(); break;
         case 'tr': tbl.endRow(); break;
-        case 'tbl': { const rows = tbl.close(); if (rows) shape.lines.push(...rows); break; }
+        case 'tbl': { const rows = tbl.close(); if (rows) for (const r of rows) shape.lines.push(r); break; }
         case 'sp': case 'graphicFrame': case 'cxnSp': case 'pic': if (stack.length) shapes.push(stack.pop()); break;
       }
     },
-    text(t) { if (!skip && inT && para) para.text += t; },
-  });
+    text(t) { if (!skip && inT && para && para.text.length < ENOUGH) para.text += t; },
+  };
+  walkXml(xml, h);
+  for (const s of stack) shapes.push(s); // unclosed shapes (truncated or stopped parts) still count
   if (loose.lines.length) shapes.push(loose);
   return { shapes, hidden };
 }
 
 async function readPptx(z, main) {
   const pres = await z.read(main);
-  const prels = await rels(z, main);
+  const prels = new Map((await rels(z, main)).map((r) => [r.id, r]));
   let slides = [];
-  if (pres) walkXml(pres, {
+  const seen = new Set();
+  const h = {
     open(name, a) {
       if (local(name) !== 'sldId') return;
-      const r = prels.find((x) => x.id === rid(a));
-      if (r && r.target && !slides.includes(r.target)) slides.push(r.target);
+      const r = prels.get(rid(a));
+      if (r && r.target && !seen.has(r.target)) { seen.add(r.target); slides.push(r.target); }
+      if (slides.length > LIMITS.slides) h.stop();
     },
-  });
+  };
+  if (pres) walkXml(pres, h);
   if (!slides.length) {
     const num = (n) => Number(/(\d+)\.xml$/i.exec(n)[1]);
     slides = z.names.filter((n) => /^ppt\/slides\/slide\d+\.xml$/i.test(n)).sort((a, b) => num(a) - num(b));
@@ -564,15 +580,16 @@ function formatKind(code) {
 }
 function dateStyles(xml) {
   const fmts = new Map(), xfs = [];
-  let inXfs = 0;
+  let inXfs = 0, inFmts = 0;
   if (xml) walkXml(xml, {
     open(name, a) {
       const n = local(name);
-      if (n === 'numFmt') fmts.set(Number(att(a, 'numFmtId')), formatKind(att(a, 'formatCode')));
+      if (n === 'numFmts') inFmts++;
+      else if (n === 'numFmt' && inFmts && fmts.size < 1000) fmts.set(Number(att(a, 'numFmtId')), formatKind(att(a, 'formatCode')));
       else if (n === 'cellXfs') inXfs++;
       else if (n === 'xf' && inXfs && xfs.length < 65536) xfs.push(Number(att(a, 'numFmtId')) || 0);
     },
-    close(name) { if (local(name) === 'cellXfs') inXfs--; },
+    close(name) { const n = local(name); if (n === 'cellXfs') inXfs--; else if (n === 'numFmts') inFmts--; },
   });
   const out = new Map();
   xfs.forEach((id, i) => { const k = fmts.has(id) ? fmts.get(id) : DATE_IDS[id]; if (k) out.set(i, k); });
@@ -679,6 +696,7 @@ async function readXlsx(z, main) {
   const wb = await z.read(main);
   if (wb == null) fail('The workbook has no main workbook part.');
   const wrels = await rels(z, main);
+  const byId = new Map(wrels.map((r) => [r.id, r]));
   const sheets = [];
   let d1904 = false;
   walkXml(wb, {
@@ -695,14 +713,14 @@ async function readXlsx(z, main) {
   let used = 0, total = 0, cut = false, stopped = false;
   for (const s of sheets) {
     if (out.full) { stopped = true; break; }
-    const r = wrels.find((x) => x.id === s.rid);
+    const r = byId.get(s.rid);
     if (!r || !r.target || !/\/worksheet$/.test(r.type)) continue;
-    const xml = await z.read(r.target);
-    if (xml == null) continue;
-    const { rows, more, wide } = sheetRows(xml, strings, dates, d1904);
+    const part = await z.prefix(r.target, LIMITS.sheetBytes);
+    if (part == null) continue;
+    const { rows, more, wide } = sheetRows(part.xml, strings, dates, d1904);
     used++;
     total += rows.length;
-    cut = cut || more || wide;
+    cut = cut || more || wide || part.partial;
     out.push(`Sheet: ${cellText(s.name)}${s.hidden ? ' (hidden)' : ''}`);
     if (!rows.length) out.push('(empty)');
     for (const line of rows) out.push(line);

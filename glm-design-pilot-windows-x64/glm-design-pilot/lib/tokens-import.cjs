@@ -367,9 +367,20 @@ function stripComments(s) {
     i = e + 2;
   }
 }
+// Selector context is derived incrementally from the parent block (one selector at a time), so deep nesting stays linear.
+// sel/lower: the innermost selector; dark: any enclosing dark-theme selector; root: inside html/body/:root;
+// rootish: top-level, :root-like or @theme/@layer context (custom properties defined there are global).
+const TOP = { sel: '', lower: '', dark: false, root: false, anyRoot: false, allRoot: true, rootish: true };
+function cssScope(parent, selector) {
+  const sel = selector.replace(/\s+/g, ' ').slice(0, 300), lower = sel.toLowerCase();
+  const dark = parent.dark || /dark|night/.test(lower);
+  const anyRoot = parent.anyRoot || /(^|[\s,>])(html|body|:root|@theme)\b/.test(lower);
+  const allRoot = parent.allRoot && ROOT_SEL.test(sel);
+  return { sel, lower, dark, anyRoot, allRoot, rootish: allRoot || anyRoot, root: anyRoot && !dark && !/@theme/.test(lower) };
+}
 function scanCSS(css) {
   const out = [], stack = [];
-  let start = 0, i = 0;
+  let start = 0, i = 0, scope = TOP;
   const n = css.length;
   const flush = (end) => {
     const s = stripComments(css.slice(start, end));
@@ -379,10 +390,8 @@ function scanCSS(css) {
       let value = s.slice(k + 1).trim();
       const bang = value.lastIndexOf('!');
       if (bang >= 0 && /^!\s*important$/i.test(value.slice(bang))) value = value.slice(0, bang).trim();
-      if (/^(--[\w-]{1,100}|[a-zA-Z-]{1,40})$/.test(prop) && value.length <= MAX_VALUE) {
-        const sel = stack.join(' ');
-        out.push({ sel, prop: prop.startsWith('--') ? prop : prop.toLowerCase(), value, dark: /dark|night/i.test(sel) });
-      }
+      if (/^(--[\w-]{1,100}|[a-zA-Z-]{1,40})$/.test(prop) && value.length <= MAX_VALUE)
+        out.push({ scope, sel: scope.sel, prop: prop.startsWith('--') ? prop : prop.toLowerCase(), value, dark: scope.dark });
     }
   };
   while (i < n) {
@@ -394,8 +403,8 @@ function scanCSS(css) {
       i = j + 1;
       continue;
     }
-    if (ch === 123) { stack.push(stripComments(css.slice(start, i)).trim().slice(0, 300)); if (stack.length > 50) stack.shift(); start = i + 1; }
-    else if (ch === 125) { flush(i); stack.pop(); start = i + 1; }
+    if (ch === 123) { stack.push(scope); scope = cssScope(scope, stripComments(css.slice(start, i)).trim()); start = i + 1; }
+    else if (ch === 125) { flush(i); scope = stack.pop() || TOP; start = i + 1; }
     else if (ch === 59) { flush(i); start = i + 1; }
     i++;
   }
@@ -455,8 +464,7 @@ function fromCSS(css, c, quiet = false) {
   let props = 0, darkSkipped = 0;
   const seen = new Set();
   for (const d of decls) {
-    const scope = d.sel.replace(/\s+/g, ' ');
-    const extra = (d.dark ? -50 : 0) + (ROOT_SEL.test(scope) || /(^|\s)(:root|html|body|@theme)\b/i.test(scope) ? 0 : -10);
+    const extra = (d.dark ? -50 : 0) + (d.scope.rootish ? 0 : -10);
     if (d.prop.startsWith('--')) {
       props++;
       const key = d.prop + (d.dark ? ':dark' : '');
@@ -465,13 +473,12 @@ function fromCSS(css, c, quiet = false) {
       const value = resolveVars(d.value, vars);
       const fr = fontRole(d.prop);
       if (addColor(c, d.prop, value, d.prop, extra)) { if (d.dark) darkSkipped++; }
-      else if (fr && !/^\s*-?[\d.]+\s*(px|rem|em|%)?\s*$/.test(value)) addFont(c, fr.role, fr.score + extra, value, d.prop);
+      else if (fr && !/^-?[\d.]+(px|rem|em|%)?$/.test(value.trim())) addFont(c, fr.role, fr.score + extra, value, d.prop);
       else if (!addRadius(c, d.prop, value, false, extra)) addSpace(c, d.prop, value, false, extra);
       continue;
     }
     const value = resolveVars(d.value, vars);
-    const sel = d.sel.toLowerCase();
-    const isRoot = /(^|[\s,>])(html|body|:root)\b/.test(sel) && !d.dark;
+    const sel = d.scope.lower, isRoot = d.scope.root;
     if (d.prop === 'font-family') {
       const role = /\bh[1-6]\b|head|title|display|hero/.test(sel) ? 'headingFont' : /\b(code|pre|kbd|samp|tt)\b|mono/.test(sel) ? 'monoFont' : 'bodyFont';
       addFont(c, role, (isRoot || role !== 'bodyFont' ? 70 : 20) + (d.dark ? -50 : 0), value, `${d.sel.slice(0, 40) || 'top level'} font-family`);

@@ -332,7 +332,7 @@ test('number formatting is compact, unit-aware and deterministic', () => {
   const { compact, tickLabel, unitize } = charts;
   assert.deepEqual([0, 7, 45.25, 950, 1284, 12900, 999999, 1500000, 2.5e9, 3e12, -15300].map(compact), ['0', '7', '45.3', '950', '1,284', '12.9k', '1M', '1.5M', '2.5B', '3T', '−15.3k']);
   assert.deepEqual([0, 250, 500, 1000, 1250, -1750].map((t) => tickLabel(t, 250)), ['0', '250', '500', '1k', '1.25k', '\u22121.75k']);
-  assert.deepEqual([0, 5e5, 1e6, 1.5e6].map((t) => tickLabel(t, 5e5)), ['0', '500', '1M', '1.5M'].map((x, i) => (i === 1 ? '500k' : x)));
+  assert.deepEqual([0, 5e5, 1e6, 1.5e6].map((t) => tickLabel(t, 5e5)), ['0', '500k', '1M', '1.5M']);
   assert.equal(tickLabel(1025, 25), '1,025');
   assert.equal(tickLabel(0.25, 0.25), '0.25');
   assert.equal(unitize('12.9k', '$'), '$12.9k');
