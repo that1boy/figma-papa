@@ -279,6 +279,16 @@ test('XLSX: sheet names, shared/inline/rich strings, numbers, booleans, errors, 
   assert.equal(r.summary, 'XLSX, 3 sheets, 206 rows, first 200 rows and 30 columns per sheet');
 });
 
+test('XLSX: very large worksheets are read only up to the first megabytes', async () => {
+  const parts = xlsxParts();
+  parts['xl/worksheets/sheet1.xml'] = parts['xl/worksheets/sheet1.xml'].replace('<row r="4">', `<!--${'x'.repeat(LIMITS.sheetBytes + 1024 * 1024)}--><row r="4">`);
+  const z = buildZip(Object.entries(parts).map(([name, data]) => ({ name, data })));
+  const r = await extractSource({ name: 'huge.xlsx', data: z });
+  assert.match(r.text, /漢字\t2024-01-15/);
+  assert.ok(!r.text.includes('tab and newline'));
+  assert.match(r.summary, /first 200 rows and 30 columns per sheet/);
+});
+
 test('XLSX: 1904 date system and a workbook without worksheets', async () => {
   const parts = xlsxParts();
   parts['xl/workbook.xml'] = parts['xl/workbook.xml'].replace('<workbookPr/>', '<workbookPr date1904="1"/>');
@@ -812,6 +822,9 @@ test('importTokens: hostile inputs stay fast (no regex backtracking, bounded var
     ':root{' + Array.from({ length: 30 }, (_, i) => `--v${i}: ${`var(--v${i + 1}) `.repeat(20)};`).join('') + '--v30: #fff; --primary: var(--v0); }',
     ':root{--primary: var(--primary); --bg: var(--fg); --fg: var(--bg);}',
     'a{color:rgb(' + '1,'.repeat(big / 3) + ')}',
+    Array.from({ length: 40 }, (_, i) => `.${'s'.repeat(290)}${i} {`).join('') + 'a:b;'.repeat((big - 12000) / 4),
+    '.dark{' + '{'.repeat(big / 2) + 'color: red;'.repeat(1000),
+    ':root{--a: ' + 'var(--b) '.repeat(50) + '; --b: ' + 'var(--c) '.repeat(50) + '; --c: #fff;}' + 'a{color: var(--a); background: var(--a)}'.repeat(3000),
     ':root{--font-body:' + "'".repeat(big - 30) + '}',
   ];
   for (const input of inputs) {
