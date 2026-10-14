@@ -1,0 +1,81 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),path=require('node:path'),os=require('node:os'),http=require('node:http');
+const {start,stop,client,waitJob}=require('./helpers.cjs');
+const S=require('../lib/schema.cjs'),{starter,starters}=require('../lib/starters.cjs'),{pageHTML}=require('../lib/presentation.cjs'),M=require('../lib/model.cjs');
+const JSZip=require('jszip');
+test('multi-screen designs validate, preserve controls and sanitize every screen',()=>{
+  for(const s of starters){const a=starter(s.id);assert(a.screens.length>=3);assert.equal(a.html,a.screens[0].html);assert.deepEqual(S.artifact(a),a);assert(pageHTML(a).includes('data-forma-screen'));}
+  const a=starter('workspace');a.screens[3].html+='<script>fetch("https://evil.invalid")</script><img src="https://evil.invalid/x" onerror="alert(1)"><input type="checkbox" checked disabled><button onclick="alert(1)" data-action="navigate" data-target="overview">Back</button>';
+  const safe=S.artifact(a);assert.doesNotMatch(safe.screens[3].html,/evil\.invalid|onclick|onerror|<script/);assert.match(safe.screens[3].html,/checked disabled/);assert.match(safe.screens[3].html,/data-action="navigate"/);
+  a.screens[1].id=a.screens[0].id;assert.throws(()=>S.artifact(a),/unique/);
+  a.screens[1].id='../escape';assert.throws(()=>S.artifact(a),/screen needs an ID/);
+  assert.throws(()=>S.designSystem({font:'url(https://evil.invalid)'}),/local font/);
+  assert.throws(()=>S.designSystem({spacing:0}),/spacing/);
+});
+test('studio API persists notes, reusable styles and copies; handoff contains all screens with honest origin',async t=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'forma-studio-api-'));let app;
+  t.after(async()=>{await stop(app);await fs.rm(dir,{recursive:true,force:true});});
+  const env={APP_PASSWORD:'test-pilot-password',MODEL_MODE:'demo',DATA_DIR:dir,HOST:'127.0.0.1'};
+  app=await start('server.cjs',env);let api=await client(app.url);
+  assert.equal((await fetch(app.url+'/api/starters')).status,401);
+  const available=(await api('/starters')).data;assert.equal(available.length,3);
+  const p=(await api('/starters/workspace','POST',{})).data;let project=(await api('/projects/'+p.id)).data;
+  const r=project.current;assert.equal(r.metrics.mode,'template');assert.equal(r.metrics.modelCalls,0);
+  const a=r.artifact;a.screens[1].name='Renamed requests';a.screens[1].html=a.screens[1].html.replace('Everything in one place.','Find your team’s work.');
+  const preview=await api(`/projects/${p.id}/preview-draft`,'POST',{artifact:a,channel:'00000000-0000-4000-8000-000000000001',screen:'requests'});
+  assert.equal(preview.status,200);const previewHTML=await api(preview.data.url.slice(4));assert.match(previewHTML.data.toString(),/inspectorRuntime/);assert.match(previewHTML.data.toString(),/Find your team/);
+  assert.match(previewHTML.headers.get('content-security-policy'),/sandbox allow-scripts allow-forms/);
+  assert.equal((await fetch(app.url+preview.data.url)).status,401);
+  assert.equal((await api('/projects/'+p.id)).data.current.id,r.id,'preview must not commit');
+  assert.equal((await api(`/projects/${p.id}/preview-draft`,'POST',{artifact:a,channel:'</script>'})).status,400);
+  const style={...a.designSystem,name:'Team blue',accent:'#123ABC'};assert.equal((await api('/design-kits','POST',style)).status,201);assert.equal((await api('/design-kits')).data[0].data.accent,'#123ABC');
+  assert.equal((await api(`/projects/${p.id}/design-system`,'POST',style)).status,200);
+  const note=(await api(`/projects/${p.id}/notes`,'POST',{revisionId:r.id,screen:'requests',target:'h1',text:'Make the heading specific.'})).data;
+  assert.equal((await api(`/projects/${p.id}/notes/${note.id}`,'PATCH',{resolved:true})).status,200);
+  assert.equal((await api(`/projects/${p.id}/notes?revision=${r.id}`)).data[0].resolved,1);
+  assert.equal((await api(`/projects/${p.id}/notes`,'POST',{revisionId:r.id,screen:'missing',text:'bad target'})).status,400);
+  const other=(await api('/starters/mobile','POST',{})).data;
+  assert.equal((await api(`/projects/${other.id}/notes/${note.id}`,'PATCH',{resolved:false})).status,400);
+  const saved=await api(`/projects/${p.id}/save`,'POST',{baseId:r.id,artifact:a});assert.equal(saved.status,201);
+  assert.equal((await api(`/projects/${p.id}/save`,'POST',{baseId:r.id,artifact:a})).status,409,'stale draft must not overwrite');
+  assert.equal((await api(`/projects/${p.id}/notes?revision=${saved.data.id}`)).data.length,0,'notes stay tied to their revision');
+  const duplicate=(await api(`/projects/${p.id}/duplicate`,'POST',{revisionId:saved.data.id})).data;
+  const copy=(await api('/projects/'+duplicate.id)).data;assert.equal(copy.current.metrics.mode,'copy');assert.equal(copy.current.artifact.screens[1].name,'Renamed requests');assert.equal(copy.designSystem.accent,'#123ABC');assert.match(copy.current.prompt,/Renamed requests/);assert.match(copy.current.prompt,/Source context carried/);
+  const exported=await api(`/projects/${p.id}/export?format=zip&revision=${r.id}`);assert.equal(exported.status,200);
+  const z=await JSZip.loadAsync(exported.data,{checkCRC32:true});assert.equal(Object.keys(z.files).filter(k=>k.startsWith('screens/')).length,4);
+  assert.match(await z.file('README.md').async('string'),/Make the heading specific/);assert.match(await z.file('README.md').async('string'),/Model mode: template/);
+  assert.match(await z.file('index.html').async('string'),/data-action="navigate"/);assert.doesNotMatch(await z.file('index.html').async('string'),/inspectorRuntime/);
+  assert.doesNotMatch(Object.keys(z.files).join(','),/env|sqlite|node_modules/);
+  const manualZip=await JSZip.loadAsync((await api(`/projects/${p.id}/export?format=zip&revision=${saved.data.id}`)).data);assert.match(await manualZip.file('README.md').async('string'),/Renamed requests/);assert.match(await manualZip.file('README.md').async('string'),/Curated|curated/);
+  await stop(app);app=await start('server.cjs',env);api=await client(app.url);
+  project=(await api('/projects/'+p.id)).data;assert.equal(project.current.artifact.screens[1].name,'Renamed requests');assert.equal((await api(`/projects/${p.id}/notes?revision=${r.id}`)).data.length,1);assert.equal((await api('/design-kits')).data.length,1);
+});
+test('visual review batches every captured view and keeps full page count',async t=>{
+  const calls=[],png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jfZkAAAAASUVORK5CYII=';
+  const mock=http.createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;const input=JSON.parse(raw);calls.push(input);res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({issues:['Check the supplied heading.'],summary:'Checked this batch.'})}}]}));});
+  await new Promise(r=>mock.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{mock.closeAllConnections();mock.close(r);}));
+  const metrics={modelCalls:0,inputTokens:0,outputTokens:0},cfg=M.configFromEnv({MODEL_MODE:'glm',GLM_BASE_URL:`http://127.0.0.1:${mock.address().port}/v1`});
+  const review=await M.critique(cfg,{references:[]},'Review',starter('workspace'),{screenshots:Array(9).fill(png),views:Array.from({length:9},(_,i)=>'View '+i),pageCount:12,metrics:{truncated:true}},new AbortController().signal,metrics);
+  assert.equal(calls.length,3);assert.deepEqual(calls.map(c=>c.messages[1].content.filter(x=>x.type==='image_url').length),[4,4,1]);assert.equal(review.pagesReviewed,9);assert.equal(review.pageCount,12);assert.equal(review.captureLimited,true);assert.equal(review.issues.length,1);assert.equal(metrics.modelCalls,3);
+  assert.match(calls[2].messages[1].content[0].text,/View 8/);
+});
+
+
+test('GLM adapter revises a copied multi-screen design with its manual edits and saved style',async t=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'forma-studio-glm-')),calls=[];let app,answer;
+  const mock=http.createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;calls.push(JSON.parse(raw));res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(answer)}}]}));});
+  await new Promise(r=>mock.listen(0,'127.0.0.1',r));
+  t.after(async()=>{await stop(app);mock.closeAllConnections();await new Promise(r=>mock.close(r));await fs.rm(dir,{recursive:true,force:true});});
+  app=await start('server.cjs',{APP_PASSWORD:'test-pilot-password',MODEL_MODE:'glm',DATA_DIR:dir,RENDER_URL:'',GLM_BASE_URL:'http://127.0.0.1:'+mock.address().port+'/v1'});const api=await client(app.url);
+  const p=(await api('/starters/workspace','POST',{})).data,first=(await api('/projects/'+p.id)).data.current;
+  first.artifact.screens[0].html=first.artifact.screens[0].html.replace('A little more clarity.','Team-specific heading');
+  first.artifact.designSystem.accent='#123ABC';
+  const saved=(await api('/projects/'+p.id+'/save','POST',{baseId:first.id,artifact:first.artifact})).data;
+  await api('/projects/'+p.id+'/design-system','POST',first.artifact.designSystem);
+  const copy=(await api('/projects/'+p.id+'/duplicate','POST',{revisionId:saved.id})).data;
+  answer=structuredClone(first.artifact);answer.title='Revised flow';delete answer.designSystem;
+  const j=(await api('/projects/'+copy.id+'/generate','POST',{prompt:'Keep all four screens and refine the title.',review:false})).data;
+  const done=await waitJob(api,j.id);assert.equal(done.status,'complete',done.error);
+  const current=(await api('/projects/'+copy.id)).data.current;assert.equal(current.origin,'glm');assert.equal(current.artifact.screens.length,4);assert.equal(current.artifact.designSystem.accent,'#123ABC');
+  assert.equal(calls.length,1);assert.match(calls[0].messages[1].content[0].text,/Team-specific heading/);assert.match(calls[0].messages[1].content[0].text,/Project design system/);assert.match(calls[0].messages[0].content,/screens|screen/);
+});

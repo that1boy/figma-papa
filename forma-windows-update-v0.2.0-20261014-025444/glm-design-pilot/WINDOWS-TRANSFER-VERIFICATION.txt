@@ -1,0 +1,24 @@
+WINDOWS TRANSFER VERIFICATION - 2 OCTOBER 2026
+
+Tested using the transfer copy and its bundled Windows x64 Node.js v24.18.0:
+
+- Created fresh .env with unique random password and secrets.
+- Re-running setup preserved existing configuration.
+- Local diagnostic command loaded application dependencies without downloads
+  and did not disclose the generated login password.
+- Started app and renderer from a different working directory.
+- Authenticated using the generated password.
+- Generated all three fixed demo formats and exported HTML, PPTX and DOCX.
+- Rendered web screenshots and a valid web PDF using an installed browser.
+- Missing LibreOffice produced a rendering-unavailable warning while editable
+  PowerPoint/Word exports remained available.
+- A second launch detected occupied ports and left the running app alone.
+- Pressing ENTER shut down both services and released both listening ports.
+
+The delivered archive excludes the test configuration, credentials, databases,
+test projects and logs. Runtime dependency licenses and a SHA-256 file manifest
+are included. Extracted archive checks are recorded in the final delivery.
+
+Not verified: the organisation's actual GLM endpoint/model output, organisation
+Windows policies, Office-to-PDF/image rendering, Docker, production-scale load.
+This is a local pilot, not an organisation-wide deployment.

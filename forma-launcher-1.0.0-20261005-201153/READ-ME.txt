@@ -1,0 +1,37 @@
+FORMA WINDOWS LAUNCHER 1.0.0
+For Forma 0.1.2 on Windows x64
+
+1. Update a stopped COPY of your existing Forma installation to 0.1.2,
+   following UPDATE-WINDOWS.txt. Keep the original installation as a backup.
+2. Put Forma.exe beside 02-start.cmd in the glm-design-pilot folder.
+3. Double-click Forma.exe. It starts the local app and opens your browser.
+   If the executable is elsewhere, choose your glm-design-pilot folder.
+4. Keep the launcher window open. Stop or close it to stop its services.
+
+This executable is a launcher, not a standalone installer or a model.
+Your existing runtime/node.exe and node_modules must remain installed.
+It also accepts an approved Node.js 24 installation when no portable runtime
+is present. It requires Windows x64 and .NET Framework 4.5 or newer.
+No runtime, dependencies, credentials, projects or model are embedded.
+The executable does not update the app, download software or change firewall
+rules. Both app services remain limited to 127.0.0.1.
+
+SETTINGS
+Stop Forma, then click Settings to edit .env in Notepad. Save before Start.
+The first run creates settings with random secrets if .env is missing.
+APP_PASSWORD is your browser login password. MODEL_MODE=demo uses fixed
+examples. For real generation, configure your organisation's GLM endpoint.
+NVIDIA/free provider availability is independent of this launcher.
+
+ERRORS
+Startup errors appear in the launcher. If a port is occupied, stop the other
+copy or configure different PORT and RENDER_PORT values. The launcher does
+not stop another application's processes. Missing runtime/dependencies must
+be restored from your existing approved installation; no download occurs.
+If Windows or organisation policy blocks the unsigned executable, use the
+existing 02-start.cmd or have IT review the source. No bypass is included.
+
+The code is at work/windows-launcher/Launcher.cs in the development project.
+Build with work/windows-launcher/build.ps1 using Windows' .NET compiler.
+Native Office rendering and real GLM output quality still need verification
+on the organisation's system.

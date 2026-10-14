@@ -1,0 +1,95 @@
+FORMA 0.2.0 - SETUP ON THE ORGANISATION'S WINDOWS COMPUTER
+
+WHERE TO FOLLOW THESE INSTRUCTIONS
+These instructions are for the person or assistant already working on the
+organisation's Windows computer where Forma will run. Use that computer's
+filesystem, terminal and browser for all steps below.
+
+"This computer", "local" and "localhost" mean that Windows computer.
+They do not mean an external personal computer or the GLM model server.
+No additional remote-desktop connection is part of this setup.
+
+Forma runs local Windows services and opens its interface in Edge/Chrome.
+It is a portable application: extract the files, configure it, then start it.
+The organisation's GLM service is a separate API that Forma connects to.
+The model itself is not included and does not need to be installed here.
+
+FILES IN THIS DOWNLOAD
+- glm-design-pilot-windows-x64.zip: original base package containing Node.js
+  and dependencies. Apply the 0.2.0 update before starting this old base.
+- forma-windows-update-v0.2.0-20261014-025444.zip: current application source.
+- forma-launcher-1.0.0-20261005-201153.zip: optional Forma.exe launcher.
+- SHA256SUMS.txt: checksums for these three ZIPs and this guide.
+
+FIRST CHECK WHETHER FORMA IS ALREADY INSTALLED
+If an installation exists, use the EXISTING INSTALLATION steps below.
+Otherwise use NEW INSTALLATION. Work in an approved writable, persistent
+folder on this computer, such as a Forma folder under your Documents.
+Extract the ZIPs before running anything; do not run files inside a ZIP.
+
+NEW INSTALLATION
+1. Extract glm-design-pilot-windows-x64.zip into your chosen folder.
+2. Extract the 0.2.0 update ZIP into a separate temporary folder. Copy the
+   CONTENTS of its glm-design-pilot folder into the base glm-design-pilot
+   folder, replacing program files. Retain node_modules and runtime.
+   Avoid creating glm-design-pilot/glm-design-pilot nesting.
+3. Confirm package.json in the installed folder says version 0.2.0.
+4. Run 01-configure.cmd. It creates settings and opens .env in Notepad.
+   Configure the organisation's approved GLM service as explained below.
+5. Save .env and run 02-start.cmd from the same installed folder.
+6. Open the URL printed by the startup command in this computer's browser
+   (normally http://127.0.0.1:8080). Log in using APP_PASSWORD from .env.
+7. Use Check connection in Forma, then try one small generation task.
+   A connection check alone does not verify image input or output quality.
+
+EXISTING INSTALLATION
+Stop that Forma installation and copy its whole folder as a backup.
+Apply the 0.2.0 update to a stopped copy using UPDATE-WINDOWS.txt in the
+update ZIP. Preserve its .env, data, runtime and node_modules folders.
+Keep the original stopped; never run two versions against the same data.
+Confirm version 0.2.0, start the updated copy and reload its browser page.
+Existing working GLM settings can be retained.
+
+CONFIGURE THE ORGANISATION'S GLM ENDPOINT
+Set these entries in .env in the installed Forma folder:
+  MODEL_MODE=glm
+  GLM_BASE_URL=http://YOUR-INTERNAL-HOST:8000/v1
+  GLM_MODEL=EXACT-DEPLOYED-MODEL-ID
+  GLM_API_KEY=YOUR-KEY-IF-REQUIRED
+
+These are placeholders, not usable connection details. Use the actual
+approved URL, deployed model ID and credential supplied by the user or
+inference team. If they are unavailable, request them instead of guessing.
+Use an OpenAI-compatible Chat Completions API. GLM_BASE_URL is its prefix;
+Forma appends /chat/completions. Do not append that route yourself.
+Keep the generated SESSION_SECRET and RENDER_TOKEN. APP_PASSWORD is the
+Forma browser login password. Keep credentials in local configuration;
+do not include them in chat responses, shared reports or uploaded files.
+
+After changing settings, stop and restart Forma. One installation uses
+one shared endpoint; individual logged-in users do not select separate
+endpoints. MODEL_MODE=demo uses fixed examples, not real GLM generation.
+Use the internal service; no public AI-provider account is needed.
+
+OPTIONAL EXE LAUNCHER
+Extract the launcher ZIP and place Forma.exe beside 02-start.cmd in the
+updated folder. It provides Start, Stop and Settings; it is not the whole
+application. Its older README mentions 0.1.2 because the launcher itself
+is unchanged. This guide uses it with the updated 0.2.0 application.
+It requires .NET Framework 4.5+ and permission to run under company policy.
+
+REQUIREMENTS AND TROUBLESHOOTING
+- Windows x64, a persistent writable folder, allowed Node/launcher execution,
+  and network access from this computer to the configured internal GLM API.
+- Edge/Chrome for the interface and browser-based rendering.
+- No Docker or npm download is needed for the included base workflow.
+- If another application uses the default ports, choose unused PORT and
+  RENDER_PORT values in .env. Do not stop unrelated applications.
+- Run 03-diagnostics.cmd for local setup diagnostics if startup fails.
+- Editable PPTX/DOCX export works without Office conversion. Native Office
+  PDF/page rendering additionally needs approved LibreOffice and Poppler.
+- Company execution policies and the actual internal connection must be
+  checked on this computer. Do not bypass controls if execution is blocked.
+
+Read STUDIO-GUIDE.md and TEAM-REVIEW.md in the updated app before team review.
+Filebin storage is temporary; download before the expiry shown on its page.
