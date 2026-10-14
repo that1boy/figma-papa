@@ -375,6 +375,12 @@ test('editElement and directions are exposed for the server as positional wrappe
   assert.deepEqual(out.results.map((r) => r.pipeline.preset).sort(), ['bold', 'neutral']);
   assert.equal(mx.pipeline.mode, 'directions');
   assert.ok(labels.some((l) => /^Clear and calm: /.test(l)));
+  // The spec's ctx-object form works too (server.cjs calls it that way).
+  const viaCtx = await M.editElement(cfg, { kind: 'web', references: [] }, current, { screen: 'home', element: '<h1>Requests</h1>', instruction: 'x' }, { signal: signal(), metrics: mx });
+  assert.equal(viaCtx.html, edit.html);
+  const viaCtx2 = await M.directions(cfg, { kind: 'web', references: [] }, 'Explore', 2, { signal: signal(), metrics: mx, onStage: () => {} });
+  assert.equal(viaCtx2.results.length, 2);
+  assert.equal(mx.calls.filter((c) => c.stage === 'edit').length, 2);
 });
 
 // ---- prompt contract ----------------------------------------------------------------

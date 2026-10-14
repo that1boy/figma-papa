@@ -100,6 +100,69 @@ test('legacy and custom systems also get AA derived colours', () => {
   assert.equal(K.derive({ accent: '#4f46e5' }).onAccent, '#ffffff');
 });
 
+test('text on filled accents and danger is always AA, even where neither white nor the ink reaches 4.5:1', () => {
+  // Regression: mid-luminance fills (#ee3115, #808080) used to get white or the system ink at ~4.3:1.
+  const fills = ['#ee3115', '#e012a8', '#808080', '#7a7a7a', '#39d271', '#ff0000', '#11885a', '#f87171', '#facc15', '#ffffff', '#000000'];
+  const failures = [];
+  for (const f of fills)
+    for (const extra of [{}, { background: '#0f052a' }, { background: '#27386e' }, { preset: 'midnight' }]) {
+      const d = K.derive({ ...extra, accent: f, danger: f });
+      for (const [on, bg] of [[d.onAccent, f], [d.onAccent, d.accentHover.hex], [d.onDanger, f], [d.onDanger, d.dangerHover.hex]])
+        if (K.contrast(on, bg) < 4.5) failures.push(`${f} ${JSON.stringify(extra)}: ${on} on ${bg} = ${K.contrast(on, bg).toFixed(2)}`);
+    }
+  assert.deepEqual(failures, []);
+});
+
+test('derived text, muted, surface-2 and tone colours stay AA for partial, custom and mode-flipped systems', () => {
+  const samples = [
+    { accent: '#ff0066' }, { accent: '#ef55af', accent2: '#e2d145', background: '#ffffff' }, // muted on surface-2 used to be 4.3:1
+    { accent: '#11885a', background: '#0f052a' }, { accent: '#6b2ede', background: '#d21b17' }, { accent: '#76fc58', background: '#b128ee' },
+    { background: '#777777' }, { background: '#6b7280' }, { background: '#fde68a', accent: '#b45309' },
+    { text: '#f5f5f5', accent: '#ff5500' }, { text: '#95fc17', accent: '#d99843' }, { surface: '#1e1e1e', accent: '#22c55e' }, { text: '#c8495e' },
+    { preset: 'neutral', background: '#0d3483' }, { preset: 'neutral', background: '#0b0d12' }, { preset: 'midnight', background: '#ffffff' },
+    { preset: 'editorial', background: '#56d9bb' }, { preset: 'luxury', background: '#d2182f' }, { preset: 'neutral', text: '#ffffff' },
+  ];
+  const failures = [];
+  for (const s of samples)
+    for (const [label, fg, bg] of textPairs(s)) {
+      const r = K.contrast(fg, bg);
+      if (r < 4.5) failures.push(`${JSON.stringify(s)} ${label}: ${fg} on ${bg} = ${r.toFixed(2)}`);
+    }
+  assert.deepEqual(failures, []);
+  // A supplied dark background on a light preset re-derives its neutrals but keeps the preset's accent and fonts.
+  const flip = K.normalizeTokens({ preset: 'neutral', background: '#0b0d12' });
+  assert.equal(flip.preset, 'neutral'); assert.equal(flip.accent, preset('neutral').tokens.accent); assert.equal(flip.headingFont, 'Inter');
+  assert.ok(K.luminance(flip.text) > 0.5 && K.luminance(flip.surface) < 0.1, 'light text on a dark surface');
+  assert.equal(flip.success, '#34d399', 'dark status colours');
+  // Light text alone implies a dark background; a dark surface alone does too.
+  assert.ok(K.luminance(K.normalizeTokens({ text: '#f5f5f5' }).background) < 0.05);
+  assert.ok(K.luminance(K.normalizeTokens({ surface: '#1e1e1e' }).background) < 0.05);
+  // Supplied colours are never rewritten, even when they clash.
+  const clash = K.normalizeTokens({ background: '#000000', text: '#111111', muted: '#222222', surface: '#050505' });
+  assert.deepEqual([clash.background, clash.text, clash.muted, clash.surface], ['#000000', '#111111', '#222222', '#050505']);
+});
+
+test('chart colours are distinct and visible on the surface', () => {
+  const cases = [...PRESETS.map(p => p.tokens), { accent: '#facc15' }, { accent: '#adca13' }, { accent: '#b6f62a', background: '#ffffff' },
+    { accent: '#4f46e5', accent2: '#4f46e5' }, { accent: '#4f46e5', accent2: '#5048e6' }, { background: '#0b0d12', accent: '#1e1b4b' }, LEGACY, LEGACY_DARK];
+  for (const t of cases) {
+    const v = K.tokenVars(t), n = K.normalizeTokens(t), chart = Array.from({ length: 6 }, (_, i) => v[`--chart-${i + 1}`]);
+    assert.equal(new Set(chart).size, 6, `distinct: ${JSON.stringify(t)} ${chart}`);
+    for (const c of chart) assert.ok(K.contrast(c, n.surface) >= 3, `${c} on ${n.surface} for ${JSON.stringify(t)}`);
+  }
+  assert.equal(K.tokenVars(preset('neutral').tokens)['--chart-1'], preset('neutral').tokens.accent, 'a visible accent is used as is');
+});
+
+test('warning tints read as amber, not as a paler danger', () => {
+  // Orange-brown warning colours mixed into white turn peach, next to the pink danger tint; light tints lean on amber.
+  const yellowness = h => parseInt(h.slice(3, 5), 16) - parseInt(h.slice(5, 7), 16);
+  for (const p of PRESETS.filter(x => !K.derive(x.tokens).dark)) {
+    const T = K.derive(p.tokens).tones;
+    assert.ok(yellowness(T.warning.soft.hex) >= 12, `${p.id} warning-soft ${T.warning.soft.hex}`);
+    assert.ok(yellowness(T.warning.soft.hex) - yellowness(T.danger.soft.hex) >= 10, `${p.id} warning vs danger tint`);
+  }
+});
+
 test('normalizeTokens fills 0.2 design systems', () => {
   const n = K.normalizeTokens(LEGACY);
   assert.deepEqual(Object.keys(n), ['name', 'preset', 'accent', 'accent2', 'background', 'surface', 'text', 'muted', 'border', 'success', 'warning', 'danger',
@@ -144,6 +207,14 @@ test('normalizeTokens validates, clamps and rejects hostile values', () => {
   assert.equal(n({ name: 'x'.repeat(200) }).name.length, 80);
   assert.equal(n({ name: 7 }).name, 'Custom');
   assert.equal(n({ evil: 'x', __proto__: { polluted: 1 } }).evil, undefined);
+  // Font stacks resolve to the first bundled or system family they name.
+  assert.equal(n({ bodyFont: "'Söhne', 'Inter', sans-serif" }).bodyFont, 'Inter');
+  assert.equal(n({ bodyFont: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto" }).bodyFont, 'Segoe UI');
+  assert.equal(n({ headingFont: '"Playfair Display", Georgia, serif' }).headingFont, 'Georgia');
+  assert.equal(n({ bodyFont: 'x,'.repeat(100000) + 'Inter' }).bodyFont, 'Segoe UI', 'huge stacks are cut off, not scanned');
+  // Enum values are case- and space-tolerant; names lose bidi overrides and line separators.
+  assert.equal(n({ density: ' Compact ' }).density, 'compact'); assert.equal(n({ shadow: 'CRISP' }).shadow, 'crisp');
+  assert.equal(n({ name: 'Team\u202e\u2066 A\u2028B\u200f' }).name, 'Team AB');
 });
 
 test('normalizeTokens is idempotent', () => {
@@ -307,4 +378,90 @@ test('KIT_EXAMPLE is safe, accessible markup using kit classes, utilities, icons
     const { unknown } = U.classifyClasses([...used].filter(c => !kit.has(c)));
     assert.deepEqual(unknown, [], 'every non-kit class is a supported utility');
   }
+});
+
+test('kit CSS regressions: solid app-shell, readable small text, hero measure, card table alignment, RTL select', () => {
+  // The app-shell sidebar column is a pseudo-element: a gradient background made every main-area text "unmeasurable" for contrast lint.
+  assert.doesNotMatch(KIT_FILE, /:where\(\.app-shell\)\{[^}]*gradient/);
+  assert.match(KIT_FILE, /:where\(\.app-shell\)::before\{[^}]*inline-size:var\(--sidebar-width\)/);
+  // No literal font size under 12px (lint flags them): avatar initials are floored at --text-xs, kbd uses --text-xs.
+  for (const [, v] of KIT_FILE.matchAll(/font-size:([^;}]+)/g)) {
+    if (/^max\(var\(--text-xs\)/.test(v)) continue;
+    for (const [, n, u] of v.matchAll(/(\d*\.?\d+)(rem|px)/g)) if (!/ - /.test(v)) assert.ok(u === 'px' ? +n >= 12 : +n >= 0.75, `font-size:${v}`);
+  }
+  assert.match(KIT_FILE, /:where\(\.avatar\)\{[^}]*font-size:max\(var\(--text-xs\),calc\(var\(--size\) \* \.38\)\)/);
+  // .hero>* (max-inline-size:100%) must not undo the lead's measure.
+  const heroAll = KIT_FILE.indexOf(':where(.hero)>:where(*){max-inline-size:100%}'), heroLead = KIT_FILE.indexOf(':where(.hero) :where(.lead){max-inline-size:60ch');
+  assert.ok(heroAll > 0 && heroLead > heroAll);
+  assert.match(KIT_FILE, /:where\(\.card>:is\(table,\.table,\.table-wrap\) :is\(th,td\):first-child\)\{padding-inline-start:var\(--pad\)\}/);
+  assert.match(KIT_FILE, /select:not\(\[multiple\],\[size\]\):dir\(rtl\)\)\{background-position:\.8125rem 50%,1\.125rem 50%\}/);
+});
+
+// Real-Chromium checks: the exemplary screen and a component sampler lint clean at desktop and phone widths, and the
+// colours Chromium computes for the color-mix() variables equal derive()'s hex values.
+let chromium = null;
+try { ({ chromium } = require('playwright')); } catch { /* playwright not installed */ }
+const exe = process.env.BROWSER_EXECUTABLE;
+const browserReady = !!chromium && (exe ? fs.existsSync(exe) : (() => { try { return fs.existsSync(chromium.executablePath()); } catch { return false; } })());
+const optional = name => { try { return require(`../lib/${name}.cjs`); } catch { return null; } };
+const SAMPLER = `<div class="container stack py-8">
+  <nav class="breadcrumb" aria-label="Breadcrumb"><ol><li><a href="#a">Workspace</a></li><li aria-current="page">Gallery</li></ol></nav>
+  <section class="hero"><p class="eyebrow">New</p><h1 class="display">Ship internal tools your team enjoys</h1><p class="lead">Lumen turns spreadsheets and approvals into calm, fast apps for every team. No code, no tickets and no waiting on IT.</p><div class="cluster"><a class="btn btn-primary btn-lg" href="#a">Start free</a><a class="btn btn-secondary btn-lg" href="#a">Book a demo</a></div></section>
+  <div class="cluster"><span class="avatar avatar-sm">AK</span><span class="avatar">LM</span><span class="avatar avatar-lg">RN</span><span class="text-sm">Press <kbd>K</kbd> to search</span><span class="badge badge-warning">Due</span><button class="chip" aria-pressed="true">Open</button><button class="btn btn-ghost btn-icon btn-sm" aria-label="More"><i data-icon="ellipsis"></i></button></div>
+  <section class="card" id="tcard"><div class="card-header"><h2 class="card-title">Invoices</h2><div class="cluster"><input type="search" aria-label="Filter invoices" placeholder="Filter"><button class="btn btn-secondary btn-sm">CSV</button></div></div>
+    <table><thead><tr><th scope="col">Invoice</th><th scope="col">Customer</th><th scope="col" class="num">Amount</th></tr></thead>
+    <tbody><tr><td data-label="Invoice"><a href="#a">INV-2041</a></td><td data-label="Customer">Northwind</td><td data-label="Amount" class="num">€12,480.00</td></tr>
+    <tr><th scope="row">Total</th><td data-label="Customer">All</td><td data-label="Amount" class="num">€12,480.00</td></tr></tbody></table></section>
+  <form class="card stack"><div class="field"><label for="k-team">Team</label><select id="k-team"><option>Finance</option></select></div><div class="field" dir="rtl"><label for="k-rtl">الفريق</label><select id="k-rtl"><option>المالية</option></select></div>
+    <label class="checkbox"><input type="checkbox" checked> Notify me</label><label class="switch"><input type="checkbox" role="switch"> Weekly digest</label><button type="submit" class="btn btn-primary">Save</button></form>
+</div>`;
+
+test('the kit example and component sampler pass page lint in Chromium at 1280px and 390px', { skip: !browserReady && 'Chromium is not available', timeout: 120000 }, async () => {
+  const U = optional('utilities'), Mk = optional('markup'), L = optional('lint');
+  const browser = await chromium.launch({ headless: true, ...(exe ? { executablePath: exe } : {}), args: ['--disable-dev-shm-usage'] });
+  try {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' })).newPage();
+    const RULES = new Set(['text-small', 'tap-target', 'contrast', 'overflow', 'line-length']);
+    for (const id of ['neutral', 'midnight', 'luxury'])
+      for (const body of [K.KIT_EXAMPLE, SAMPLER]) {
+        const tokens = preset(id).tokens, html = Mk?.expandMarkup ? Mk.expandMarkup(body) : body;
+        const util = U?.utilityCSS ? U.utilityCSS(U.collectClasses(body), tokens) : '';
+        await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${K.kitCSS(tokens)}\n${util}\n${Mk?.MARKUP_CSS || ''}</style></head><body><div data-forma-screen="s">${html}</div></body></html>`);
+        await page.evaluate(() => document.fonts.ready);
+        for (const [w, h] of [[1280, 900], [390, 844]]) {
+          await page.setViewportSize({ width: w, height: h });
+          if (L?.PAGE_LINT) {
+            const found = (await page.evaluate(L.PAGE_LINT, { viewport: String(w), screen: 's' })).filter(f => f.severity !== 'info' && RULES.has(f.rule));
+            assert.deepEqual(found.map(f => `${f.rule} ${f.target}: ${f.message}`), [], `${id} ${w}px ${body === SAMPLER ? 'sampler' : 'example'}`);
+          }
+          const m = await page.evaluate(() => {
+            const q = s => document.querySelector(s), cs = (s, p) => q(s) && getComputedStyle(q(s))[p];
+            return { shell: cs('.app-shell', 'backgroundImage'), fontMin: Math.min(...[...document.querySelectorAll('.avatar,kbd,.badge,.help')].map(e => parseFloat(getComputedStyle(e).fontSize))),
+              th: cs('#tcard th', 'paddingLeft'), hd: cs('#tcard .card-header', 'paddingLeft'), input: q('#tcard .card-header input')?.getBoundingClientRect().height, btn: q('#tcard .card-header .btn')?.getBoundingClientRect().height,
+              inputRow: q('#tcard .card-header input') && q('#tcard .card-header input').getBoundingClientRect().top === q('#tcard .card-header .btn').getBoundingClientRect().top - (q('#tcard .card-header input').getBoundingClientRect().height - q('#tcard .card-header .btn').getBoundingClientRect().height) / 2,
+              rtl: cs('#k-rtl', 'backgroundPositionX'), lead: q('.hero .lead')?.getBoundingClientRect().width, leadFont: parseFloat(cs('.hero .lead', 'fontSize') || 0) };
+          });
+          if (body === K.KIT_EXAMPLE) assert.equal(m.shell, 'none', 'app-shell paints a solid colour');
+          assert.ok(m.fontMin >= 12, `smallest kit text ${m.fontMin}px`);
+          if (body === SAMPLER) {
+            if (w === 1280) assert.equal(m.th, m.hd, 'table columns line up with the card header');
+            assert.equal(m.input, m.btn, 'card-header field matches btn-sm height');
+            assert.ok(m.inputRow, 'card-header field and button share a row');
+            assert.match(m.rtl, /^13px/, 'select arrow sits at the start edge in RTL');
+            assert.ok(m.lead <= m.leadFont * 0.62 * 64, `hero lead keeps a readable measure (${m.lead}px)`);
+          }
+        }
+      }
+    // color-mix() percentages chosen in JS resolve to the same colours in the browser.
+    for (const t of [preset('neutral').tokens, preset('midnight').tokens, { accent: '#facc15' }, { preset: 'neutral', background: '#0d3483' }, { accent: '#e58595', background: '#a549ab' }]) {
+      const d = K.derive(t), want = { '--surface-2': d.surface2.hex, '--border-strong': d.borderStrong.hex, '--accent-hover': d.accentHover.hex, '--danger-hover': d.dangerHover.hex };
+      for (const [tone, v] of Object.entries(d.tones)) Object.assign(want, { [`--${tone}-soft`]: v.soft.hex, [`--${tone}-strong`]: v.strong.hex });
+      await page.setContent(`<style>${K.tokensCSS(t)}</style>` + Object.keys(want).map(k => `<p data-v="${k}"></p>`).join(''));
+      const got = await page.evaluate(names => names.map(n => { const e = document.querySelector(`[data-v="${n}"]`); e.style.color = `var(${n})`; const c = document.createElement('canvas').getContext('2d'); c.fillStyle = getComputedStyle(e).color; c.fillRect(0, 0, 1, 1); return [...c.getImageData(0, 0, 1, 1).data.slice(0, 3)]; }), Object.keys(want));
+      Object.keys(want).forEach((k, i) => {
+        const exp = [1, 3, 5].map(j => parseInt(want[k].slice(j, j + 2), 16));
+        assert.ok(exp.every((x, j) => Math.abs(x - got[i][j]) <= 1), `${JSON.stringify(t)} ${k}: derive ${want[k]}, Chromium rgb(${got[i]})`);
+      });
+    }
+  } finally { await browser.close(); }
 });

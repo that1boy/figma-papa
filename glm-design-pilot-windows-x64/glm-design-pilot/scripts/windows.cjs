@@ -117,10 +117,17 @@ async function main() {
   process.env.PORT = String(appPort);
   process.env.RENDER_PORT = String(renderPort);
   process.env.RENDER_URL = `http://127.0.0.1:${renderPort}`;
-  // Dependencies are included in the transfer ZIP; never run npm here.
-  for (const dependency of ['docx', 'pptxgenjs', 'playwright', 'sanitize-html']) require(dependency);
+  // Dependencies are included in the transfer ZIP; never run npm here. jszip and htmlparser2
+  // are transitive dependencies that the 0.3 source import reads directly.
+  for (const dependency of ['docx', 'pptxgenjs', 'playwright', 'sanitize-html', 'jszip', 'htmlparser2']) require(dependency);
   require('node:sqlite');
-  require('../lib/model.cjs').configFromEnv();
+  for (const file of ['llm', 'kit', 'presets', 'utilities', 'icons', 'charts', 'svg', 'lint', 'inputs', 'tokens-import', 'pipeline', 'prompts', 'schema', 'studio-routes'])
+    require(`../lib/${file}.cjs`);
+  // Bundled design assets are inlined into every page; a partial copy would fail later.
+  const { FONTS } = require('../lib/presets.cjs');
+  for (const file of ['assets/kit/forma-kit.css', 'assets/icons/lucide.json', ...Object.values(FONTS).filter((f) => f.file).map((f) => `assets/fonts/${f.file}`)])
+    if (!fs.existsSync(path.join(root, file))) throw new Error(`${file} is missing. Extract the complete Windows ZIP again.`);
+  require('../lib/model.cjs').configFromEnv(); // validates the GLM_* settings, including the 0.3 ones
   if ((process.env.APP_PASSWORD || '').length < 12)
     throw new Error('APP_PASSWORD in .env must have at least 12 characters.');
   if ((process.env.RENDER_TOKEN || '').length < 16)

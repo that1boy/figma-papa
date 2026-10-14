@@ -295,13 +295,16 @@ async function critique(cfg, project, prompt, a, render, signal, metrics, previo
 
 // ---- surgical edits and directions (staged web pipeline) --------------------
 
+// Both accept the positional (signal, metrics, onStage) form used by generate()
+// and the spec's ctx object ({ signal, metrics, onStage, onDelta }).
+const ctxOf = (x, metrics, onStage) => (x && typeof x === 'object' && !(x instanceof AbortSignal) ? x : { signal: x, metrics, onStage });
 // request: { screen, element (stored outer HTML), instruction } -> { html, css, notes }
 function editElement(cfg, project, a, request, signal, metrics) {
-  return pipeline.editElement(cfg, project, a, request || {}, { signal, metrics });
+  return pipeline.editElement(cfg, project, a, request || {}, ctxOf(signal, metrics));
 }
 // -> { results: [{ name, index, artifact, pipeline }], failed: [message] }
 function directions(cfg, project, prompt, count, signal, metrics, onStage) {
-  return pipeline.directions(cfg, project, prompt, count, { signal, metrics, onStage });
+  return pipeline.directions(cfg, project, prompt, count, ctxOf(signal, metrics, onStage));
 }
 
 module.exports = {

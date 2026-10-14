@@ -183,6 +183,45 @@ describe('staticLint: web', () => {
     assert.deepEqual(of(f, 'chart-invalid'), []);
     assert.ok(!of(f, 'icon-unknown').length, 'a real Lucide name is never reported');
   });
+  it('reports duplicate screen ids and keeps the navigation edges of every copy', () => {
+    const f = staticLint(web([
+      { id: 'home', name: 'Home', html: '<main><h1>Home</h1><p>Welcome back to the workspace.</p></main>' },
+      { id: 'b', name: 'B', html: '<main><h1>B</h1><p>Second screen with real copy.</p></main>' },
+      { id: 'home', name: 'Home again', html: '<main><h1>Home again</h1><button data-action="navigate" data-target="b">B</button></main>' },
+    ]), NO);
+    assert.deepEqual(of(f, 'duplicate-screen').map((x) => [x.screen, x.severity]), [['home', 'error']]);
+    assert.match(of(f, 'duplicate-screen')[0].message, /used by 2 screens/);
+    assert.deepEqual(of(f, 'unreachable-screen'), [], 'the second "home" copy still links to b');
+    assert.match(of(staticLint(web([{ id: 'home', name: 'Home', html: '<main><h1>Home</h1><button data-action="navigate" data-target="x">X</button></main>' }, { id: 'home', name: 'Dup', html: '<p>Duplicate copy here, long enough.</p>' }]), NO), 'nav-target')[0].message, /Use one of: home\.$/, 'the id list is deduplicated');
+  });
+  it('counts controls inside a data-action ancestor as wired, and submit buttons outside forms as inert', () => {
+    const f = one('<main><h1>Cards</h1><div data-action="navigate" data-target="home"><a href="#">Open card</a><button>More</button></div><button type="submit">Send</button><form><button type="submit">Save</button></form></main>');
+    assert.deepEqual(of(f, 'link-dead'), [], 'the runtime handles clicks inside [data-action] via closest()');
+    assert.match(of(f, 'button-inert')[0].message, /^1 button does nothing/);
+  });
+  it('wraps validator messages in exactly one full stop and validates slide chart objects directly', () => {
+    const validateChart = () => { throw new Error('Unknown chart type "radar". Use one of: bar, line.'); };
+    const f = of(one(`<main><h1>C</h1><figure class="chart" data-chart='{"type":"radar"}'></figure></main>`, { ...NO, validateChart }), 'chart-invalid');
+    assert.equal(f[0].message, 'Invalid chart: Unknown chart type "radar". Use one of: bar, line.');
+    let seen;
+    const s = staticLint({ kind: 'slides', slides: [{ id: 's1', title: 'Revenue', chart: { type: 'bar', labels: ['a'], series: [{ values: [1n] }] } }] }, { validateChart: (spec) => { seen = spec; throw new Error('Series value 1 is not a finite number.'); } });
+    assert.equal(typeof seen.series[0].values[0], 'bigint', 'the object reaches the validator unserialised');
+    assert.deepEqual(of(s, 'chart-invalid').map((x) => x.message), ['Slide 1 chart is invalid: Series value 1 is not a finite number.']);
+    assert.ok(!of(s, 'lint-failed').length);
+    assert.match(of(staticLint({ kind: 'slides', slides: [{ title: 'Big', chart: { type: 'bar', title: 'x'.repeat(6100) } }] }, NO), 'chart-invalid')[0].message, /over 6000 characters/);
+  });
+  it('treats kitClasses null as no kit and survives odd injected values', () => {
+    const classifyClasses = (n) => ({ supported: [], unknown: [...n] });
+    assert.match(of(one('<main class="btn"><h1>T</h1></main>', { ...NO, classifyClasses, kitClasses: null }), 'class-undefined')[0].message, /btn/);
+    for (const kitClasses of [5, 'btn', { nope: 1 }, new Set(['btn'])]) assert.ok(Array.isArray(one('<main class="btn"><h1>T</h1></main>', { ...NO, classifyClasses, kitClasses })), String(kitClasses));
+    assert.deepEqual(of(one('<main class="btn"><h1>T</h1></main>', { ...NO, classifyClasses, kitClasses: new Set(['btn']) }), 'class-undefined'), []);
+  });
+  it('bounds the cost of oversized and deeply nested screens', () => {
+    const t0 = performance.now();
+    const f = one('<div>'.repeat(200000) + 'deep text');
+    assert.ok(performance.now() - t0 < 5000, `${Math.round(performance.now() - t0)}ms`);
+    assert.ok(Array.isArray(f));
+  });
   it('sorts errors before warnings before info', () => {
     const f = one('<main><a href="#">Dead</a><h1 id="a">T</h1><p id="a">Lorem ipsum</p><button data-action="nope">x</button></main>');
     const rank = { error: 0, warning: 1, info: 2 };
@@ -272,6 +311,18 @@ describe('scoreFindings, findingsPrompt, mergeFindings, cleanFindings', () => {
   it('merges duplicate findings across viewports and keeps errors first', () => {
     const m = mergeFindings([F('warning', 'tap-target'), F('error', 'contrast', { viewport: 'desktop' })], [F('error', 'contrast', { viewport: 'mobile' }), F('error', 'contrast', { viewport: 'mobile' })], [F('info', 'dead', { viewport: null })]);
     assert.deepEqual(m.map((x) => [x.rule, x.viewport]), [['contrast', 'desktop,mobile'], ['tap-target', 'mobile'], ['dead', null]]);
+  });
+  it('merges idempotently: merged viewport lists never duplicate and the most severe copy wins', () => {
+    const once = mergeFindings([F('error', 'contrast', { viewport: 'desktop' })], [F('error', 'contrast', { viewport: 'mobile' })]);
+    assert.equal(once[0].viewport, 'desktop,mobile');
+    const twice = mergeFindings(once, once, [F('error', 'contrast', { viewport: 'tablet,mobile' })]);
+    assert.deepEqual(twice.map((x) => x.viewport), ['desktop,mobile,tablet']);
+    const sev = mergeFindings([F('warning', 'x', { message: 'same', viewport: null })], [F('error', 'x', { message: 'same', viewport: 'mobile' })]);
+    assert.deepEqual(sev.map((x) => [x.severity, x.viewport]), [['error', 'mobile']]);
+    const wide = mergeFindings(...Array.from({ length: 30 }, (_, i) => [F('info', 'x', { viewport: `viewport-${i}` })]));
+    assert.ok(wide[0].viewport.length <= 80);
+    assert.deepEqual(L.sortFindings([F('info'), null, F('bogus'), F('error')]).map((x) => x && x.severity), ['error', 'info', null, 'bogus']);
+    assert.deepEqual(L.sortFindings('nope'), []);
   });
   it('cleans untrusted findings', () => {
     assert.deepEqual(cleanFindings('nope'), []);
@@ -454,6 +505,62 @@ describe('PAGE_LINT in Chromium', () => {
     assert.equal(viaSource[0].screen, 'q');
     const viaHelper = await lintPage(page, { viewport: 'desktop' });
     assert.equal(viaHelper[0].screen, 's1');
+  }));
+  it('counts omitted findings once per element, not once per overlapping pair', guard(async () => {
+    const f = await lint('<div class="s">' + Array.from({ length: 40 }, (_, i) => `<span class="o">Overlapping text ${i}</span>`).join('') + '</div>', { css: '.s{position:relative;height:40px}.o{position:absolute;top:0;left:0}' });
+    const o = of(f, 'text-overlap');
+    assert.equal(o.filter((x) => x.severity === 'warning').length, 12);
+    assert.equal(o.find((x) => x.severity === 'info').message, '27 more text-overlap findings were omitted; fix the pattern everywhere.');
+  }));
+  it('composites ::before/::after overlays that cover a positioned host', guard(async () => {
+    const css = '.h{position:relative;background:#fff;padding:24px}.h>p{position:relative;margin:0}.solid::before,.tint::after,.grad::before{content:"";position:absolute;inset:0}' +
+      '.solid::before{background:#111}.solid>p{color:#fff}.tint::after{background:rgba(0,0,0,.5)}.tint>p{z-index:1;color:#fff}.grad::before{background:linear-gradient(#000,#333)}.grad>p{color:#fff}' +
+      '.bar::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:#000}.bar>p{color:#bbb}';
+    const f = await lint('<div class="h solid"><p>White on a dark overlay</p></div><div class="h tint"><p>White on a tinted overlay</p></div><div class="h grad"><p>White on a gradient overlay</p></div><div class="h bar"><p>Grey beside an accent bar</p></div>', { css });
+    assert.deepEqual(of(f, 'contrast').map((x) => [x.target, /on (#\w+)/.exec(x.message)[1]]), [['div.h:nth-of-type(2) > p', '#808080'], ['div.h:nth-of-type(4) > p', '#ffffff']], 'solid overlay passes; translucent one is composited; a thin bar is ignored');
+    assert.deepEqual(of(f, 'contrast-unknown').map((x) => x.target), ['div.h:nth-of-type(3) > p']);
+  }));
+  it('hit-tests overlays with pointer-events:none and leaves the page styles as they were', guard(async () => {
+    const css = '.hero{position:relative;background:#fff;padding:40px}.shade{position:absolute;inset:0;background:#111;pointer-events:none}.t,.u{position:relative}.t{color:#fff}.u{color:#333}';
+    await page.setContent('<!doctype html><html><head><style>body{margin:0;font:16px Arial}' + css + '</style></head><body><div data-forma-screen="s1"><div class="hero"><div class="shade"></div><h1 class="t">Welcome</h1><p class="u">Dark grey on the dark overlay</p></div></div></body></html>');
+    await page.evaluate(() => { const s = new CSSStyleSheet(); s.replaceSync('.t{letter-spacing:0}'); document.adoptedStyleSheets = [s]; });
+    const f = shape(await page.evaluate(PAGE_LINT, { viewport: 'desktop', screen: 's1' }));
+    assert.deepEqual(of(f, 'contrast').map((x) => x.message.slice(0, 61)), ['"Dark grey on the dark overlay": text #333333 on #111111 is 1']);
+    assert.deepEqual(await page.evaluate(() => [document.adoptedStyleSheets.length, document.adoptedStyleSheets[0].cssRules[0].selectorText, getComputedStyle(document.querySelector('.shade')).pointerEvents]), [1, '.t', 'none']);
+  }));
+  it('treats gradient page backgrounds as unmeasured instead of white', guard(async () => {
+    for (const css of ['body{background:linear-gradient(#000,#222)}', 'html{background:linear-gradient(#000,#222)}body{background:transparent}', 'body::before{content:"";position:fixed;inset:0;z-index:-1;background:linear-gradient(#000,#111)}']) {
+      const f = await lint('<h1 class="w">Hero on a dark page</h1><p class="w">White copy on the page gradient</p><div class="card"><p class="g">Grey on a white card</p></div>', { css: css + '.w{color:#fff}.card{background:#fff}.g{color:#bbb}' });
+      assert.deepEqual(of(f, 'contrast').map((x) => x.target), ['div.card > p.g'], css);
+      assert.equal(of(f, 'contrast-unknown').length, 2, css);
+    }
+  }));
+  it('accepts the viewport label as a bare string argument (spec form)', guard(async () => {
+    await lint('<p class="low">Low</p>', { css: '.low{color:#ccc}' });
+    const f = shape(await page.evaluate(L.PAGE_LINT_FN, 'mobile'));
+    assert.deepEqual(f.map((x) => [x.rule, x.viewport, x.screen]), [['contrast', 'mobile', 's1']]);
+  }));
+  it('stops early under its time budget and says which checks were cut short', guard(async () => {
+    const html = Array.from({ length: 3000 }, (_, i) => `<p>Paragraph ${i}</p>`).join('');
+    const f = await lint(html, { opts: { budget: 1 } });
+    const p = of(f, 'lint-partial');
+    assert.equal(p.length, 1);
+    assert.match(p[0].message, /^Page lint stopped after \d+ms .*skipped part of: text/);
+    assert.deepEqual(of(await lint(html), 'lint-partial'), [], 'the default budget is ample for ordinary pages');
+  }));
+  it('does not judge overlaid text it cannot hit-test against the wrong (ancestor) background', guard(async () => {
+    // App-shell layout: the window cannot scroll, the inner scroller holds the content.
+    const css = 'html,body{height:100%;overflow:hidden}.main{height:100vh;overflow:auto}.spacer{height:1500px}.hero{position:relative}.shade{position:absolute;inset:0;background:#111}.hero p{position:relative;color:#fff;margin:0;padding:20px}';
+    const f = await lint('<div class="main"><div class="spacer"></div><div class="hero"><div class="shade"></div><p>White text on the dark overlay</p></div></div>', { css });
+    assert.deepEqual(of(f, 'contrast'), [], 'white on #111 must not be reported as white on white');
+    assert.match(of(f, 'contrast-unknown')[0].message, /^1 text element over overlapping layers could not be hit-tested/);
+  }));
+  it('blames the overflowing descendant rather than its wrappers, also right to left', guard(async () => {
+    const f = await lint('<div class="a"><div class="b"><div class="c"><p class="w">Wide block</p></div></div></div>', { width: 390, viewport: 'mobile', css: '.w{width:900px}' });
+    assert.deepEqual(of(f, 'overflow').map((x) => x.target), ['div.a > div.b > div.c > p.w']);
+    await page.setContent('<!doctype html><html dir="rtl"><head><style>body{margin:0;font:16px Arial}</style></head><body><div data-forma-screen="s1"><main><div class="wide" style="width:600px">Wide right-to-left panel</div></main></div></body></html>');
+    const r = shape(await page.evaluate(PAGE_LINT, { viewport: 'mobile', screen: 's1' }));
+    assert.deepEqual(of(r, 'overflow').map((x) => [x.target, x.message.slice(0, 26)]), [['main > div.wide', 'Extends 210px past the 390']]);
   }));
 
   it('browserRender keeps its existing fields and adds lint and lintScore', guard(async (t) => {

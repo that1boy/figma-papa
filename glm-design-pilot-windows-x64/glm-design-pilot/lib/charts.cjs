@@ -169,19 +169,19 @@ const chars = (s) => Array.from(String(s));
 // Approximate advance widths (em) of a UI sans at text sizes, erring wide: East
 // Asian wide characters and emoji 1em, wide letters 0.88, capitals 0.7, digits
 // 0.62, narrow glyphs 0.34, everything else 0.58.
-const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]/u;
-const advance = (c) => (WIDE.test(c) ? 1 : /[mwMW@%—]/.test(c) ? 0.88 : /[A-Z#&]/.test(c) ? 0.7 : /[0-9$€£¥+=<>~^_±×−–?]/.test(c) ? 0.62 : /[ijlI.,:;'"!|()[\]{}/ frt]/.test(c) ? 0.34 : 0.58);
+const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]/u;
+const advance = (c) => (WIDE.test(c) ? 1 : /[mwMW@%\u2014]/.test(c) ? 0.88 : /[A-Z#&]/.test(c) ? 0.7 : /[0-9$\u20ac\u00a3\u00a5+=<>~^_\u00b1\u00d7\u2212\u2013?]/.test(c) ? 0.62 : /[ijlI.,:;'"!|()[\]{}/ frt]/.test(c) ? 0.34 : 0.58);
 const width = (s, size = 12) => chars(s).reduce((n, c) => n + advance(c), 0) * size;
 // Truncate with an ellipsis to fit `px` at `size` (always keeps one character).
 const clip = (s, px, size = 12) => {
   if (width(s, size) <= px) return String(s);
-  let out = '', used = advance('…') * size;
+  let out = '', used = advance('\u2026') * size;
   for (const c of chars(s)) {
     if (out && used + advance(c) * size > px) break;
     out += c;
     used += advance(c) * size;
   }
-  return out.trimEnd() + '…';
+  return out.trimEnd() + '\u2026';
 };
 const n1 = (v) => {
   const x = Math.round(v * 10) / 10;
@@ -534,14 +534,16 @@ function expandCharts(html) {
 // Presentation-time expansion of the compact model markup. Charts run first so
 // a host's data-forma-source is its stored form even if it contains icons.
 const expandMarkup = (html) => expandIcons(expandCharts(html));
-// Page CSS for expanded markup (append after the kit). Without it charts show
-// their 540-unit variant and icons sit on the text baseline.
-const MARKUP_CSS = `:where(svg[data-forma-expanded="icon"]){flex-shrink:0;vertical-align:-0.125em}
+// Page CSS for expanded markup. Without it charts show their 540-unit variant and
+// icons sit on the text baseline. It lives in a cascade layer, so wherever it is
+// placed the kit, utilities and model CSS (unlayered) override its defaults; the
+// !important variant switch still wins over everything, including inline styles.
+const MARKUP_CSS = `@layer forma-markup{:where(svg[data-forma-expanded="icon"]){flex-shrink:0;vertical-align:-0.125em}
 :where([data-forma-expanded="chart"]){width:100%;min-width:0;margin:0}
 [data-forma-variants]{container-type:inline-size}
 [data-forma-variants]>svg{display:none!important}
 [data-forma-variants]>[data-forma-variant="md"]{display:block!important}
 @container (max-width:469.98px){[data-forma-variants]>[data-forma-variant="md"]{display:none!important}[data-forma-variants]>[data-forma-variant="sm"]{display:block!important}}
-@container (min-width:700px){[data-forma-variants]>[data-forma-variant="md"]{display:none!important}[data-forma-variants]>[data-forma-variant="lg"]{display:block!important}}`;
+@container (min-width:700px){[data-forma-variants]>[data-forma-variant="md"]{display:none!important}[data-forma-variants]>[data-forma-variant="lg"]{display:block!important}}}`;
 
 module.exports = { expandCharts, expandMarkup, validateChart, chartSVG, chartHTML, niceTicks, compact, tickLabel, unitize, MARKUP_CSS, CHART_TYPES: TYPES };

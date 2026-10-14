@@ -292,16 +292,25 @@ async function tryRender(a, p, signal, metrics) {
     return null;
   }
 }
+// GLM element edits and directions: model.cjs wrappers (positional signal, metrics, onStage),
+// or the pipeline's ctx form when an older model.cjs lacks them.
 const glmPipeline = () => require('./lib/pipeline.cjs');
-// GLM directions: M.directions (spec section 7 signature) or the pipeline directly.
-// Accepts artifact[], [{name, artifact}] or {results, failed}.
-async function glmDirections(p, prompt, count, ctx) {
-  const out = await (M.directions || glmPipeline().directions)(cfg, p, prompt, count, ctx);
+const glmEditElement = (p, a, request, signal, metrics) =>
+  M.editElement ? M.editElement(cfg, p, a, request, signal, metrics) : glmPipeline().editElement(cfg, p, a, request, { signal, metrics });
+// Accepts {results: [{name, artifact, pipeline}], failed}, [{name, artifact}] or artifact[].
+async function glmDirections(p, prompt, count, signal, metrics, onStage) {
+  const out = await (M.directions
+    ? M.directions(cfg, p, prompt, count, signal, metrics, onStage)
+    : glmPipeline().directions(cfg, p, prompt, count, { signal, metrics, onStage }));
   const list = Array.isArray(out) ? out : out?.results || [];
   return {
     results: list
       .map((r, i) =>
-        r?.artifact ? { name: String(r.name || `Direction ${i + 1}`).slice(0, 80), artifact: r.artifact } : r?.kind ? { name: `Direction ${i + 1}`, artifact: r } : null,
+        r?.artifact
+          ? { name: String(r.name || `Direction ${i + 1}`).slice(0, 80), artifact: r.artifact, pipeline: r.pipeline || null }
+          : r?.kind
+            ? { name: `Direction ${i + 1}`, artifact: r, pipeline: null }
+            : null,
       )
       .filter(Boolean),
     failed: Array.isArray(out?.failed) ? out.failed.map((x) => String(x?.message || x).slice(0, 300)) : [],
@@ -460,7 +469,7 @@ async function runDirections(job, p, metrics, stage, signal, start) {
   if (cfg.mode === 'demo') {
     await sleep(400, null, { signal }).catch(() => {});
     results = demoDirections(count);
-  } else ({ results, failed } = await glmDirections(p, job.prompt, count, { signal, metrics, onStage: stage }));
+  } else ({ results, failed } = await glmDirections(p, job.prompt, count, signal, metrics, stage));
   if (signal.aborted) throw new Error('Cancelled.');
   // Model-derived artifacts are validated again here; one invalid direction does not sink the rest.
   results = results.flatMap((r) => {
@@ -482,7 +491,7 @@ async function runDirections(job, p, metrics, stage, signal, start) {
       m = structuredClone({ ...shared, review: null, render: null });
     const render = await tryRender(a, p, signal, m);
     finish(m, a, p, render, start);
-    if (m.pipeline) m.pipeline = { ...m.pipeline, direction: r.name };
+    m.pipeline = r.pipeline ? { ...r.pipeline, direction: r.name } : m.pipeline && { ...m.pipeline, direction: r.name };
     m.direction = { name: r.name, index, jobId: job.id, total: results.length };
     const rid = id();
     if (render) await saveRender(rid, render);
@@ -776,11 +785,7 @@ const server = http.createServer(async (req, res) => {
             p.sources = projectSources(db, p.id, true).map((s) => ({ name: s.name, text: s.text }));
             const metrics = { mode: cfg.mode, model: cfg.model, modelCalls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0 },
               start = Date.now();
-            const out = await (M.editElement || glmPipeline().editElement)(cfg, p, r.artifact, { screen, element, instruction }, {
-              signal: controller.signal,
-              metrics,
-              onStage: () => {},
-            });
+            const out = await glmEditElement(p, r.artifact, { screen, element, instruction }, controller.signal, metrics);
             if (controller.signal.aborted) return;
             if (typeof out?.html !== 'string' || !out.html.trim())
               throw new Error('GLM did not return the edited element in the expected format.');
