@@ -13,6 +13,8 @@ async function browserRender(payload) {
     await page.setContent(payload.html,{waitUntil:'load',timeout:15000});await page.evaluate(()=>document.fonts.ready);
     const ids=await page.locator('[data-forma-screen]').evaluateAll(nodes=>nodes.map(n=>({id:n.dataset.formaScreen,name:n.getAttribute('aria-label')})));
     const screenList=ids.length?ids:[{id:null,name:'Page'}],screenshots=[],views=[],screenMetrics=[],lint=[];
+    // Lint time budget per evaluate: about 30s in total across screens and viewports, so the 90s render deadline holds.
+    const lintBudget=Math.max(300,Math.min(1500,Math.floor(30000/(screenList.length*3))));
     for(const screen of screenList){
       if(screen.id)await page.evaluate(id=>window.formaNavigate(id,false),screen.id);
       const measure={id:screen.id,name:screen.name};
@@ -36,7 +38,7 @@ async function browserRender(payload) {
         });
         measure[label.toLowerCase()]=m;
         // Deterministic design lint: one evaluate per screen and viewport; it restores the scroll position.
-        try{lint.push(...cleanFindings(await page.evaluate(PAGE_LINT,{viewport:label.toLowerCase(),screen:screen.id})));}
+        try{lint.push(...cleanFindings(await page.evaluate(PAGE_LINT,{viewport:label.toLowerCase(),screen:screen.id,budget:lintBudget})));}
         catch(e){lint.push({rule:'lint-failed',severity:'info',screen:screen.id,viewport:label.toLowerCase(),target:'page',message:'Page lint failed: '+String(e?.message||e).slice(0,160)});}
         screenshots.push((await page.screenshot({fullPage:false})).toString('base64'));views.push(`${screen.name} / ${label} ${width} × ${height}, top`);
         if(label==='Mobile'&&m.height>height){await page.evaluate(()=>scrollTo(0,document.documentElement.scrollHeight));screenshots.push((await page.screenshot({fullPage:false})).toString('base64'));views.push(`${screen.name} / Mobile ${width} × ${height}, bottom (middle scroll positions may be omitted)`);}

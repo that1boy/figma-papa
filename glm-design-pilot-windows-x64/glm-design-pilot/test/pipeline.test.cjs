@@ -225,3 +225,113 @@ test('plan normalization repairs ids and caps screens', () => {
   assert.deepEqual(plan.screens.slice(0, 3).map((s) => s.id), ['s-1-home-page', 'home-page', 's-1-home-page-2']);
   assert.equal(pipeline.normalizePlan({}, 'Do a thing').screens[0].id, 'home');
 });
+
+test('plan repairs stay JSON calls and plans may list screens as plain names', async (t) => {
+  let n = 0;
+  const m = await mockModel((body) => {
+    if (isPlan(body)) return ++n === 1 ? 'no plan yet' : JSON.stringify({ title: 'Named', screens: ['Inbox', 'Settings page'] });
+    return `<forma-screen id="${screenOf(body)}">${screenHTML(screenOf(body))}</forma-screen>`;
+  });
+  t.after(m.close);
+  m.cfg.jsonMode = true;
+  const metrics = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
+  const a = await pipeline.generate(m.cfg, project(), 'Two screens', null, ctx(metrics));
+  assert.equal(m.calls[1].body.response_format.type, 'json_object', 'the plan repair asks for JSON too');
+  assert.equal(m.calls[2].body.response_format, undefined, 'tagged-block builds are not forced into JSON');
+  assert.deepEqual(a.screens.map((s) => s.id), ['inbox', 'settings-page']);
+  assert.deepEqual(metrics.calls.map((c) => c.stage), ['plan', 'repair', 'build', 'build']);
+  for (const c of m.calls) assert.doesNotMatch(system(c.body), /Teal accent/, 'brand guidance stays in the user message');
+});
+
+test('later screens only append CSS, unused tweaks are dropped and plan tokens override a project design system', async (t) => {
+  const plan = {
+    ...PLAN,
+    preset: 'project',
+    tokens: { accent: '#b42318', headingFont: 'Fraunces', radius: '14px', bogus: 'x' },
+    tweaks: [...PLAN.tweaks, { var: '--hero-min-height', label: 'Hero', min: 200, max: 600, step: 10, unit: 'px', value: 320 }, { var: '--dead-slider', label: 'Dead', min: 0, max: 4, step: 1, unit: 'px', value: 2 }],
+  };
+  const m = await mockModel((body) => {
+    if (isPlan(body)) return JSON.stringify(plan);
+    const id = screenOf(body);
+    if (id === 'overview') return `<forma-css>.hero{min-height:var(--hero-min-height)}</forma-css><forma-screen id="overview">${screenHTML(id)}</forma-screen>`;
+    return `<forma-css mode="replace">.only-${id}{gap:4px}</forma-css><forma-screen id="${id}">${screenHTML(id)}</forma-screen>`;
+  });
+  t.after(m.close);
+  const ds = { name: 'Team', preset: 'neutral', accent: '#4f46e5', background: '#fafafa', text: '#18181b', radius: 8, spacing: 8 };
+  const a = await pipeline.generate(m.cfg, project({ designSystem: ds }), 'Make it red with serif headings', null, ctx());
+  assert.match(a.css, /\.hero\{min-height:var\(--hero-min-height\)\}/, 'first screen CSS survives a later "replace"');
+  assert.match(a.css, /\.only-requests\{gap:4px\}/);
+  assert.match(a.css, /\.only-new\{gap:4px\}/);
+  assert.deepEqual(a.tweaks.map((x) => x.var), ['--sidebar-width', '--hero-min-height']);
+  assert.equal(a.designSystem.accent, '#b42318');
+  assert.equal(a.designSystem.headingFont, 'Fraunces');
+  assert.equal(a.designSystem.radius, 14);
+  assert.equal(a.designSystem.background, '#fafafa', 'unchanged project tokens are kept');
+  assert.equal(a.theme.accent, '#b42318');
+  assert.equal(pipeline.designFor({ designSystem: ds }, { tokens: {} }).accent, '#4f46e5');
+  assert.equal(pipeline.designFor({}, { preset: 'nope', tokens: {} }).preset, 'neutral');
+  assert.equal(pipeline.designFor({}, { preset: 'editorial', tokens: { accent: 'not a colour' } }).accent, '#a63d1c');
+});
+
+test('a failed screen stops its siblings', async (t) => {
+  const m = await mockModel(async (body) => {
+    if (isPlan(body)) return JSON.stringify(PLAN);
+    const id = screenOf(body);
+    if (id === 'new') await new Promise((r) => setTimeout(r, 700));
+    return id === 'requests' ? 'prose only' : `<forma-screen id="${id}">${screenHTML(id)}</forma-screen>`;
+  });
+  t.after(m.close);
+  const metrics = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
+  await assert.rejects(pipeline.generate(m.cfg, project(), 'x', null, ctx(metrics)), /did not return the "Requests" screen/);
+  await new Promise((r) => setTimeout(r, 900));
+  // plan, overview, requests and its repair; the slow sibling was aborted, not completed.
+  assert.deepEqual(metrics.calls.map((c) => c.stage), ['plan', 'build', 'build', 'repair']);
+});
+
+test('revisions can change design tokens through forma-meta and update screens matched by name', async (t) => {
+  const m = await mockModel(() => '<forma-meta>{"tokens":{"accent":"#7c3aed","density":"compact","nope":1}}</forma-meta><forma-screen name="Two"><main><h1>Two, matched by name</h1></main></forma-screen>');
+  t.after(m.close);
+  const current = { ...structuredClone(CURRENT), designSystem: { name: 'Desk', preset: 'neutral', accent: '#0f766e', background: '#ffffff', text: '#111111', radius: 8, spacing: 8 } };
+  const metrics = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
+  const a = await pipeline.generate(m.cfg, project(), 'Purple and compact', current, ctx(metrics));
+  assert.equal(a.designSystem.accent, '#7c3aed');
+  assert.equal(a.designSystem.density, 'compact');
+  assert.equal(a.designSystem.background, '#ffffff');
+  assert.equal(a.theme.accent, '#7c3aed');
+  assert.deepEqual(a.screens.map((s) => s.id), ['one', 'two', 'three']);
+  assert.equal(a.screens[1].html, '<main><h1>Two, matched by name</h1></main>');
+  assert.equal(a.screens[0].html, CURRENT.screens[0].html);
+  assert.deepEqual(metrics.pipeline.changed, ['two', 'tokens']);
+  assert.match(userText(m.calls[0].body), /Existing screen ids: one, two, three/);
+
+  const presetSwitch = pipeline.applyRevision(structuredClone(CURRENT), '<forma-meta>{"preset":"midnight"}</forma-meta>');
+  assert.equal(presetSwitch.artifact.designSystem.preset, 'midnight');
+  assert.equal(presetSwitch.artifact.theme.background, '#0b0d12');
+  assert.throws(() => pipeline.applyRevision(structuredClone(CURRENT), 'Only prose, sorry.'), /No <forma-screen>, <forma-css>, <forma-remove> or <forma-meta> blocks were returned/);
+});
+
+test('element edits accept the selection html alias and require an element', async (t) => {
+  const m = await mockModel(() => '<forma-element><p class="lead">Shorter</p></forma-element>');
+  t.after(m.close);
+  const out = await pipeline.editElement(m.cfg, project(), structuredClone(CURRENT), { screen: 'one', index: 3, html: '<p>Keep me exactly.</p>', instruction: 'Shorter' }, ctx());
+  assert.equal(out.html, '<p class="lead">Shorter</p>');
+  assert.match(userText(m.calls[0].body), /Selected element \(stored HTML\):\n<p>Keep me exactly\.<\/p>/);
+  await assert.rejects(pipeline.editElement(m.cfg, project(), structuredClone(CURRENT), { screen: 'one', instruction: 'x' }, ctx()), /Select an element/);
+});
+
+test('directions report per-direction pipeline details', async (t) => {
+  const m = await mockModel((body) => {
+    if (isPlan(body)) return JSON.stringify({ ...PLAN, preset: userText(body).match(/Suggested preset: ([a-z]+)/)[1], screens: [PLAN.screens[0]] });
+    return `<forma-screen id="overview">${screenHTML('overview')}</forma-screen>`;
+  });
+  t.after(m.close);
+  const metrics = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
+  const out = await pipeline.directions(m.cfg, project(), 'Explore', 4, ctx(metrics));
+  assert.deepEqual(out.results.map((r) => [r.name, r.index, r.pipeline.preset, r.artifact.designSystem.preset]), [
+    ['Clear and calm', 0, 'neutral', 'neutral'],
+    ['Bold and expressive', 1, 'bold', 'bold'],
+    ['Dense and efficient', 2, 'enterprise', 'enterprise'],
+    ['Warm and editorial', 3, 'editorial', 'editorial'],
+  ]);
+  assert.deepEqual(metrics.pipeline, { mode: 'directions', directions: out.results.map((r) => r.name), failed: 0 });
+});

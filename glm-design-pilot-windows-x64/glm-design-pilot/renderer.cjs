@@ -17,7 +17,7 @@ async function officeRender(payload) {
   if (
     !['pptx', 'docx'].includes(payload.extension) ||
     typeof payload.file !== 'string' ||
-    payload.file.length > 14000000
+    payload.file.length > 30000000
   )
     throw new Error('Invalid Office render request.');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'design-render-'));
@@ -89,7 +89,8 @@ const server = http.createServer(async (req, res) => {
   if (active >= 2) return send(res, 429, { error: 'Renderer is busy; try again.' });
   active++;
   try {
-    const input = await body(req, 15000000);
+    // Pages embed up to six reference images (about 4.2 MB each as data URLs) plus fonts.
+    const input = await body(req, 32000000);
     send(res, 200, await (req.url === '/office' ? officeRender(input) : browserRender(input)));
   } catch (e) {
     console.error('Render failed:', e.code || e.name);

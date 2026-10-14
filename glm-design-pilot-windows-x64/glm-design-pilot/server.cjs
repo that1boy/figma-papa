@@ -5,17 +5,24 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { setTimeout: sleep } = require('node:timers/promises');
 const { body, send } = require('./lib/http.cjs');
 const S = require('./lib/schema.cjs');
 const { prepareImport } = require('./lib/import.cjs');
 const M = require('./lib/model.cjs');
-const { initializeHistory, briefHistory } = require('./lib/history.cjs');
+const L = require('./lib/llm.cjs');
+const { initializeHistory, briefHistory, manualPrompt } = require('./lib/history.cjs');
 const { demo } = require('./lib/demo.cjs');
 const { pageHTML, CSP, warnings } = require('./lib/presentation.cjs');
 const { exportPPTX, exportDOCX } = require('./lib/exports.cjs');
-const { initializeStudio, projectStyle, studioRoute } = require('./lib/studio-routes.cjs');
+const { initializeStudio, projectStyle, projectSources, insertSource, insertProject, insertStyle, extractSources, studioRoute, tx: transaction, MAX_SOURCES } = require('./lib/studio-routes.cjs');
 const { handoff } = require('./lib/handoff.cjs');
+const { staticLint, mergeFindings, scoreFindings } = require('./lib/lint.cjs');
+const { PRESETS, FONTS, preset } = require('./lib/presets.cjs');
+const VERSION = '0.3.0';
 const cfg = M.configFromEnv();
+// The 0.3 GLM settings (section 1). model.configFromEnv may already include them.
+if (!cfg.effort) L.extendConfig(cfg);
 const dataDir = path.resolve(process.env.DATA_DIR || './data');
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(path.join(dataDir, 'renders'), { recursive: true });
@@ -46,6 +53,26 @@ CREATE TABLE IF NOT EXISTS revisions(id TEXT PRIMARY KEY,project_id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),prompt TEXT NOT NULL,review INTEGER NOT NULL,base_id TEXT,status TEXT NOT NULL,stage TEXT NOT NULL,error TEXT,result_id TEXT,created TEXT NOT NULL,updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS evaluations(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES revisions(id),data TEXT NOT NULL,created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS revisions_project ON revisions(project_id); CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);`);
+// 0.3 job columns, added in place so 0.2 databases keep their rows.
+function addColumns(table, columns) {
+  const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+  const missing = columns.filter(([name]) => !have.has(name));
+  if (!missing.length) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const [name, definition] of missing) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+addColumns('jobs', [
+  ['kind', "TEXT NOT NULL DEFAULT 'generate'"],
+  ['options', "TEXT NOT NULL DEFAULT '{}'"],
+  ['progress', "TEXT NOT NULL DEFAULT '{}'"],
+  ['result_ids', "TEXT NOT NULL DEFAULT '[]'"],
+]);
 initializeHistory(db);
 initializeStudio(db);
 db.prepare(
@@ -53,6 +80,16 @@ db.prepare(
 ).run(new Date().toISOString());
 const now = () => new Date().toISOString(),
   id = () => crypto.randomUUID();
+const tx = (fn) => transaction(db, fn);
+const parse = (text, fallback) => {
+  try {
+    return text ? JSON.parse(text) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const jobView = (j) =>
+  j && { ...j, kind: j.kind || 'generate', options: parse(j.options, {}), progress: parse(j.progress, {}), result_ids: parse(j.result_ids, []) };
 function project(pid) {
   const p = db.prepare('SELECT * FROM projects WHERE id=?').get(pid);
   if (!p) throw Object.assign(new Error('Project not found.'), { status: 404 });
@@ -75,36 +112,59 @@ function assertIdle(pid) {
       { status: 409 },
     );
 }
-// Transactionally insert the artifact and advance the current revision.
-function commit(p, a, prompt, origin, metrics, rid = id(), parentId = p.current_id) {
-  const date = now();
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    db.prepare(
-      'INSERT INTO revisions(id,project_id,artifact,prompt,origin,metrics,created,parent_id) VALUES(?,?,?,?,?,?,?,?)',
-    ).run(rid, p.id, JSON.stringify(a), prompt, origin, JSON.stringify(metrics), date, parentId || null);
-    db.prepare('UPDATE projects SET current_id=?,title=?,updated=? WHERE id=?').run(
-      rid,
-      a.title,
-      date,
-      p.id,
-    );
-    db.exec('COMMIT');
-    return rid;
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
-  }
+// Transactionally insert revisions. The first entry advances the current revision
+// unless advance is false (directions keep their siblings off the current branch).
+function commitMany(p, entries) {
+  const t = Date.now();
+  return tx(() => {
+    const rids = entries.map((e, i) => {
+      const rid = e.rid || id();
+      db.prepare(
+        'INSERT INTO revisions(id,project_id,artifact,prompt,origin,metrics,created,parent_id) VALUES(?,?,?,?,?,?,?,?)',
+      ).run(rid, p.id, JSON.stringify(e.a), e.prompt, e.origin, JSON.stringify(e.metrics), new Date(t - i).toISOString(), e.parentId || null);
+      return rid;
+    });
+    if (entries[0].advance !== false)
+      db.prepare('UPDATE projects SET current_id=?,title=?,updated=? WHERE id=?').run(rids[0], entries[0].a.title, new Date(t).toISOString(), p.id);
+    return rids;
+  });
 }
-function updateJob(jid, status, stage, error = null, result = null) {
-  db.prepare('UPDATE jobs SET status=?,stage=?,error=?,result_id=?,updated=? WHERE id=?').run(
+function commit(p, a, prompt, origin, metrics, rid = id(), parentId = p.current_id) {
+  return commitMany(p, [{ a, prompt, origin, metrics, rid, parentId }])[0];
+}
+function updateJob(jid, status, stage, error = null, result = null, resultIds = null) {
+  const phase = { complete: 'complete', failed: 'failed', cancelled: 'cancelled' }[status];
+  db.prepare(
+    `UPDATE jobs SET status=?,stage=?,error=?,result_id=?,updated=?${phase ? ',progress=?' : ''}${resultIds ? ',result_ids=?' : ''} WHERE id=?`,
+  ).run(
     status,
     stage,
     error,
     result,
     now(),
+    ...(phase ? [JSON.stringify({ phase, label: stage })] : []),
+    ...(resultIds ? [JSON.stringify(resultIds)] : []),
     jid,
   );
+}
+// The renderer accepts two concurrent renders and answers 429 beyond that; queue here.
+const RENDER_SLOTS = 2,
+  renderWaiters = [];
+let rendering = 0;
+function renderSlot(signal) {
+  if (signal?.aborted) return Promise.reject(new Error('Cancelled.'));
+  if (rendering < RENDER_SLOTS) return (rendering++, Promise.resolve());
+  return new Promise((resolve, reject) => {
+    const abort = () => (renderWaiters.splice(renderWaiters.indexOf(waiter) >>> 0, 1), reject(new Error('Cancelled.')));
+    const waiter = () => (signal?.removeEventListener('abort', abort), resolve());
+    renderWaiters.push(waiter);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+function releaseRender() {
+  const next = renderWaiters.shift();
+  if (next) next();
+  else rendering--;
 }
 async function renderArtifact(a, refs, signal) {
   if (!process.env.RENDER_URL || !process.env.RENDER_TOKEN)
@@ -120,36 +180,154 @@ async function renderArtifact(a, refs, signal) {
       ),
     };
   }
-  const response = await fetch(process.env.RENDER_URL.replace(/\/$/, '') + route, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.RENDER_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(165000)]),
-    redirect: 'error',
-  });
-  if (!response.ok) throw new Error('Rendering service unavailable.');
-  const result = await response.json();
-  if (
-    !Array.isArray(result.screenshots) ||
-    !result.screenshots.length ||
-    typeof result.pdf !== 'string'
-  )
-    throw new Error('Invalid renderer response.');
-  return result;
+  const json = JSON.stringify(payload);
+  await renderSlot(signal);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(process.env.RENDER_URL.replace(/\/$/, '') + route, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.RENDER_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: json,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(165000)]),
+        redirect: 'error',
+      });
+      // Busy (another process shares the renderer): retry once after a short pause.
+      if (response.status === 429 && !attempt) {
+        await response.body?.cancel().catch(() => {});
+        await sleep(1500, null, { signal });
+        continue;
+      }
+      if (!response.ok) throw new Error('Rendering service unavailable.');
+      const result = await response.json();
+      if (
+        !Array.isArray(result.screenshots) ||
+        !result.screenshots.length ||
+        typeof result.pdf !== 'string'
+      )
+        throw new Error('Invalid renderer response.');
+      return result;
+    }
+  } finally {
+    releaseRender();
+  }
 }
 async function saveRender(rid, render) {
-  await fsp.writeFile(
-    path.join(dataDir, 'renders', rid + '.pdf'),
-    Buffer.from(render.pdf, 'base64'),
-  );
+  const dir = path.join(dataDir, 'renders'),
+    own = new RegExp(`^${rid}-\\d+\\.png$`);
+  // A re-render can produce fewer views: never serve a stale screenshot from an earlier render.
+  for (const name of await fsp.readdir(dir)) if (own.test(name)) await fsp.rm(path.join(dir, name), { force: true });
+  await fsp.writeFile(path.join(dir, rid + '.pdf'), Buffer.from(render.pdf, 'base64'));
   await Promise.all(
     render.screenshots.map((s, i) =>
-      fsp.writeFile(path.join(dataDir, 'renders', `${rid}-${i}.png`), Buffer.from(s, 'base64')),
+      fsp.writeFile(path.join(dir, `${rid}-${i}.png`), Buffer.from(s, 'base64')),
     ),
   );
+}
+const LINT_WARNING = 'Design lint found';
+// Static findings plus the renderer's page findings, errors first, capped for storage.
+function applyLint(metrics, a, render) {
+  let all = [];
+  try {
+    all = mergeFindings(staticLint(a), render?.metrics?.lint || []);
+  } catch (e) {
+    console.error('Lint failed:', e.message);
+  }
+  metrics.lint = all.slice(0, 200);
+  metrics.lintScore = scoreFindings(all);
+  metrics.warnings = (metrics.warnings || []).filter((w) => !w.startsWith(LINT_WARNING));
+  const errors = all.filter((f) => f.severity === 'error');
+  if (errors.length)
+    metrics.warnings.push(
+      `${LINT_WARNING} ${errors.length} error${errors.length === 1 ? '' : 's'} (${[...new Set(errors.map((f) => f.rule))].slice(0, 5).join(', ')}). Inspect the lint findings before handoff.`,
+    );
+}
+function renderSummary(render) {
+  const { lint, ...rest } = render.metrics || {};
+  return {
+    pageCount: render.pageCount,
+    screenshots: render.screenshots.length,
+    basis: render.basis,
+    views: render.views || [],
+    ...rest,
+  };
+}
+function renderWarnings(metrics, render) {
+  metrics.warnings = metrics.warnings.filter((w) => !w.startsWith('Rendering unavailable'));
+  metrics.render = renderSummary(render);
+  if (render.metrics?.horizontalOverflow)
+    metrics.warnings.push('The browser detected horizontal overflow.');
+  if (render.metrics?.mobileHorizontalOverflow)
+    metrics.warnings.push('The mobile browser detected horizontal overflow at 390 px.');
+  if (render.metrics?.mobileMissingLabels)
+    metrics.warnings.push('The mobile table hides column headers and has cells without visible field labels.');
+  if (render.metrics?.tabletHorizontalOverflow) metrics.warnings.push('The tablet browser detected horizontal overflow at 768 px.');
+  if (render.metrics?.unnamedControls) metrics.warnings.push(`${render.metrics.unnamedControls} visible controls may lack accessible names.`);
+  if (render.metrics?.brokenTargets) metrics.warnings.push(`${render.metrics.brokenTargets} prototype interactions reference a missing target.`);
+  if (render.metrics?.inactiveButtons) metrics.warnings.push(`${render.metrics.inactiveButtons} buttons have no supported prototype action. Check whether these controls should work.`);
+  if (render.metrics?.duplicateIds) metrics.warnings.push('Duplicate HTML IDs were found within a screen. Check labels and interaction targets.');
+}
+const RENDER_UNAVAILABLE =
+  'Rendering unavailable. Browser preview is available, but native export layout and visual review remain unverified.';
+const DEMO_WARNING =
+  'Fixed demo content. Prompts and images are not interpreted in demo mode; no GLM quality claim can be made.';
+// Final checks shared by single generations and every direction.
+function finish(metrics, a, p, render, start) {
+  metrics.warnings.push(...warnings(a, p.references));
+  if (render) renderWarnings(metrics, render);
+  applyLint(metrics, a, render);
+  metrics.calls = Array.isArray(metrics.calls) ? metrics.calls.slice(0, 100) : [];
+  metrics.reasoningTokens ||= 0;
+  metrics.pipeline ??= cfg.mode === 'glm' ? { mode: p.kind === 'web' ? cfg.pipeline : 'single' } : null;
+  metrics.durationSeconds = Math.round((Date.now() - start) / 1000);
+}
+async function tryRender(a, p, signal, metrics) {
+  try {
+    return await renderArtifact(a, p.references, signal);
+  } catch (e) {
+    if (signal.aborted) throw e;
+    if (!metrics.warnings.includes(RENDER_UNAVAILABLE)) metrics.warnings.push(RENDER_UNAVAILABLE);
+    return null;
+  }
+}
+const glmPipeline = () => require('./lib/pipeline.cjs');
+// GLM directions: M.directions (spec section 7 signature) or the pipeline directly.
+// Accepts artifact[], [{name, artifact}] or {results, failed}.
+async function glmDirections(p, prompt, count, ctx) {
+  const out = await (M.directions || glmPipeline().directions)(cfg, p, prompt, count, ctx);
+  const list = Array.isArray(out) ? out : out?.results || [];
+  return {
+    results: list
+      .map((r, i) =>
+        r?.artifact ? { name: String(r.name || `Direction ${i + 1}`).slice(0, 80), artifact: r.artifact } : r?.kind ? { name: `Direction ${i + 1}`, artifact: r } : null,
+      )
+      .filter(Boolean),
+    failed: Array.isArray(out?.failed) ? out.failed.map((x) => String(x?.message || x).slice(0, 300)) : [],
+  };
+}
+// Demo directions: the fixed demo restyled with distinct curated presets, clearly labelled.
+const DEMO_PRESETS = ['neutral', 'bold', 'enterprise', 'editorial'];
+function demoDirections(count) {
+  return DEMO_PRESETS.slice(0, count).map((key, i) => {
+    const look = preset(key) || PRESETS[i],
+      a = demo('web'),
+      ds = S.designSystem({ ...look.tokens });
+    return {
+      name: `Demo direction ${i + 1}: ${look.name}`,
+      artifact: S.artifact(
+        {
+          ...a,
+          title: `${a.title} (demo direction ${i + 1}: ${look.name})`,
+          summary: `Fixed demonstration content restyled with the ${look.name} preset. Not generated from your brief.`,
+          theme: { accent: ds.accent, background: ds.background, text: ds.text },
+          designSystem: ds,
+        },
+        'web',
+      ),
+    };
+  });
 }
 let running = 0;
 const controllers = new Map();
@@ -164,42 +342,59 @@ async function runJob(job) {
     modelCalls: 0,
     inputTokens: 0,
     outputTokens: 0,
+    reasoningTokens: 0,
+    calls: [],
     warnings: [],
     review: null,
     render: null,
   };
-  const stage = (s, label) => {
+  // Progress is written at most once per second, and always when the phase changes.
+  let phase = null,
+    written = 0;
+  const stage = (s, label, extra) => {
     if (signal.aborted) throw new Error('Cancelled.');
-    updateJob(job.id, 'running', label || s);
+    const t = Date.now();
+    if (s === phase && t - written < 1000) return;
+    phase = s;
+    written = t;
+    const info = extra && typeof extra === 'object' ? extra : {};
+    const chars = /([\d.]+)k characters/.exec(label || '')?.[1];
+    const progress = {
+      phase: s,
+      label: label || s,
+      done: Number.isFinite(info.done) ? info.done : null,
+      total: Number.isFinite(info.total) ? info.total : null,
+      chars: Number.isFinite(info.chars) ? info.chars : chars ? Math.round(Number(chars) * 1000) : null,
+      calls: metrics.modelCalls || 0,
+    };
+    db.prepare("UPDATE jobs SET stage=?,progress=?,updated=? WHERE id=? AND status='running'").run(
+      progress.label,
+      JSON.stringify(progress),
+      now(),
+      job.id,
+    );
   };
   try {
     const p = project(job.project_id),
       current = job.base_id ? revision(job.base_id, p.id).artifact : null;
     p.history = briefHistory(db, p.id, job.base_id);
+    p.sources = projectSources(db, p.id, true).map((s) => ({ name: s.name, text: s.text }));
     metrics.sourceBriefCount = p.history.briefs.length;
+    if (p.sources.length) metrics.sourceDocuments = p.sources.length;
     if (p.history.omitted) metrics.warnings.push(`${p.history.omitted} older revision briefs exceeded the context limit. The original brief and latest instructions were retained; inspect factual continuity.`);
+    if (job.kind === 'directions') return await runDirections(job, p, metrics, stage, signal, start);
     stage(
       'generating',
       cfg.mode === 'demo' ? 'Loading fixed demonstration' : 'Generating with GLM',
     );
     let a;
     if (cfg.mode === 'demo') {
-      await new Promise((r) => setTimeout(r, 400));
+      await sleep(400, null, { signal }).catch(() => {});
       a = S.artifact(demo(p.kind, current), p.kind);
-      metrics.warnings.push(
-        'Fixed demo content. Prompts and images are not interpreted in demo mode; no GLM quality claim can be made.',
-      );
+      metrics.warnings.push(DEMO_WARNING);
     } else a = await M.generate(cfg, p, job.prompt, current, signal, metrics, stage);
     stage('rendering', 'Rendering the artifact');
-    let render;
-    try {
-      render = await renderArtifact(a, p.references, signal);
-    } catch (e) {
-      if (signal.aborted) throw e;
-      metrics.warnings.push(
-        'Rendering unavailable. Browser preview is available, but native export layout and visual review remain unverified.',
-      );
-    }
+    let render = await tryRender(a, p, signal, metrics);
     if (job.review && cfg.mode === 'glm') {
       stage('reviewing', render ? 'Checking content and rendered output' : 'Checking content against the brief');
       try {
@@ -236,34 +431,12 @@ async function runJob(job) {
       }
     }
     if (signal.aborted) throw new Error('Cancelled.');
-    metrics.warnings.push(...warnings(a, p.references));
-    if (render) {
-      metrics.warnings = metrics.warnings.filter((w) => !w.startsWith('Rendering unavailable'));
-      metrics.render = {
-        pageCount: render.pageCount,
-        screenshots: render.screenshots.length,
-        basis: render.basis,
-        views: render.views || [],
-        ...render.metrics,
-      };
-      if (render.metrics?.horizontalOverflow)
-        metrics.warnings.push('The browser detected horizontal overflow.');
-      if (render.metrics?.mobileHorizontalOverflow)
-        metrics.warnings.push('The mobile browser detected horizontal overflow at 390 px.');
-      if (render.metrics?.mobileMissingLabels)
-        metrics.warnings.push('The mobile table hides column headers and has cells without visible field labels.');
-      if (render.metrics?.tabletHorizontalOverflow) metrics.warnings.push('The tablet browser detected horizontal overflow at 768 px.');
-      if (render.metrics?.unnamedControls) metrics.warnings.push(`${render.metrics.unnamedControls} visible controls may lack accessible names.`);
-      if (render.metrics?.brokenTargets) metrics.warnings.push(`${render.metrics.brokenTargets} prototype interactions reference a missing target.`);
-      if (render.metrics?.inactiveButtons) metrics.warnings.push(`${render.metrics.inactiveButtons} buttons have no supported prototype action. Check whether these controls should work.`);
-      if (render.metrics?.duplicateIds) metrics.warnings.push('Duplicate HTML IDs were found within a screen. Check labels and interaction targets.');
-    }
-    metrics.durationSeconds = Math.round((Date.now() - start) / 1000);
+    finish(metrics, a, p, render, start);
     const rid = id();
     if (render) await saveRender(rid, render);
     if (signal.aborted) throw new Error('Cancelled.');
-    commit(p, a, job.prompt, cfg.mode, metrics, rid);
-    updateJob(job.id, 'complete', 'Ready for your review', null, rid);
+    commit(p, a, job.prompt, cfg.mode, metrics, rid, job.base_id);
+    updateJob(job.id, 'complete', 'Ready for your review', null, rid, [rid]);
   } catch (e) {
     const cancelled = signal.aborted;
     updateJob(
@@ -278,6 +451,47 @@ async function runJob(job) {
     setImmediate(pump);
   }
 }
+// 2–4 variants of a new web design. Every success is rendered (one at a time), linted and
+// committed with parent_id = base; only the first advances the project's current revision.
+async function runDirections(job, p, metrics, stage, signal, start) {
+  const count = Math.max(2, Math.min(4, Number(parse(job.options, {}).count) || 3));
+  stage('generating', cfg.mode === 'demo' ? `Loading ${count} demonstration directions` : `Generating ${count} directions with GLM`, { done: 0, total: count });
+  let results, failed = [];
+  if (cfg.mode === 'demo') {
+    await sleep(400, null, { signal }).catch(() => {});
+    results = demoDirections(count);
+  } else ({ results, failed } = await glmDirections(p, job.prompt, count, { signal, metrics, onStage: stage }));
+  if (signal.aborted) throw new Error('Cancelled.');
+  // Model-derived artifacts are validated again here; one invalid direction does not sink the rest.
+  results = results.flatMap((r) => {
+    try {
+      return [{ ...r, artifact: S.artifact(r.artifact, 'web') }];
+    } catch (e) {
+      failed.push(`${r.name}: ${e.message}`);
+      return [];
+    }
+  });
+  if (!results.length) throw new Error(failed[0] || 'GLM returned no usable direction.');
+  const shared = { ...metrics, warnings: [...metrics.warnings] };
+  if (cfg.mode === 'demo') shared.warnings.push(DEMO_WARNING);
+  if (failed.length) shared.warnings.push(`${failed.length} of ${count} directions failed and were not saved: ${failed[0]}`);
+  const entries = [];
+  for (const [index, r] of results.entries()) {
+    stage('rendering', `Rendering direction ${index + 1} of ${results.length}`, { done: index, total: results.length });
+    const a = r.artifact,
+      m = structuredClone({ ...shared, review: null, render: null });
+    const render = await tryRender(a, p, signal, m);
+    finish(m, a, p, render, start);
+    if (m.pipeline) m.pipeline = { ...m.pipeline, direction: r.name };
+    m.direction = { name: r.name, index, jobId: job.id, total: results.length };
+    const rid = id();
+    if (render) await saveRender(rid, render);
+    entries.push({ a, prompt: job.prompt, origin: cfg.mode, metrics: m, rid, parentId: job.base_id });
+  }
+  if (signal.aborted) throw new Error('Cancelled.');
+  const rids = commitMany(p, entries);
+  updateJob(job.id, 'complete', `${rids.length} directions ready for your review`, null, rids[0], rids);
+}
 function pump() {
   while (running < maxJobs) {
     const job = db
@@ -285,8 +499,13 @@ function pump() {
       .get();
     if (!job) break;
     running++;
-    updateJob(job.id, 'running', 'Starting');
-    runJob(job);
+    db.prepare("UPDATE jobs SET status='running',stage='Starting',progress=?,updated=? WHERE id=?").run(
+      JSON.stringify({ phase: 'starting', label: 'Starting', done: null, total: null, chars: null, calls: 0 }),
+      now(),
+      job.id,
+    );
+    // runJob handles its own failures; this only guards against a failing status update.
+    runJob(job).catch((e) => console.error('Job runner failed:', e.message));
   }
 }
 function sessionToken() {
@@ -319,8 +538,14 @@ const loginAttempts = new Map();
 function mutateGuard(req) {
   if (req.headers['x-studio-request'] !== '1')
     throw Object.assign(new Error('Missing request header.'), { status: 403 });
-  if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host)
-    throw Object.assign(new Error('Cross-origin request denied.'), { status: 403 });
+  if (req.headers.origin) {
+    let host = null;
+    try {
+      host = new URL(req.headers.origin).host; // "null" (sandboxed or file pages) does not parse
+    } catch {}
+    if (host !== req.headers.host)
+      throw Object.assign(new Error('Cross-origin request denied.'), { status: 403 });
+  }
 }
 const secureCookie = process.env.COOKIE_SECURE === 'true' ? '; Secure' : '';
 const appCSP =
@@ -366,14 +591,24 @@ const server = http.createServer(async (req, res) => {
     if (parts[0] === 'api') {
       if (!signedIn(req)) return send(res, 401, { error: 'Sign in to the pilot workspace.' });
       if(await studioRoute(req,res,url,{db,id,now,project,revision,assertIdle})) return;
-      if (url.pathname === '/api/config')
+      if (url.pathname === '/api/config') {
+        const supported = cfg.mode === 'glm' ? L.visionSupported(cfg) : false;
         return send(res, 200, {
           mode: cfg.mode,
           model: cfg.model,
           maxJobs,
           renderConfigured: !!process.env.RENDER_URL,
-          version: require('./package.json').version,
+          version: VERSION,
+          // Effective image handling: 'auto' becomes 'off' once the endpoint has rejected images.
+          vision: cfg.mode !== 'glm' || cfg.vision === 'off' || (cfg.vision === 'auto' && supported === false) ? 'off' : cfg.vision,
+          visionSupported: supported,
+          pipeline: cfg.pipeline,
+          maxReferences: S.MAX_REFERENCES,
+          maxSources: MAX_SOURCES,
+          presets: PRESETS.map(({ id, name, description, mood, tokens }) => ({ id, name, description, mood, tokens })),
+          fonts: Object.keys(FONTS),
         });
+      }
       if (url.pathname === '/api/model/test' && req.method === 'POST') {
         if (cfg.mode === 'demo')
           return send(res, 200, {
@@ -407,21 +642,26 @@ const server = http.createServer(async (req, res) => {
             .all(),
         );
       if (url.pathname === '/api/projects' && req.method === 'POST') {
-        const input = await body(req);
+        // Six reference images (≤ 4.2 MB each as data URLs) plus source documents.
+        const input = await body(req, 45000000);
         if (!S.KINDS.includes(input.kind)) S.fail('Unknown project type.');
         const refs = S.references(input.references);
+        const title = S.str(input.title || 'Untitled project', 'Title', 140, true),
+          brand = S.str(input.brand || '', 'Brand guidance', 12000);
+        let style = null;
+        if (input.preset != null && input.preset !== '') {
+          const look = preset(S.str(input.preset, 'Preset', 40));
+          if (!look) S.fail('Unknown design preset.');
+          style = S.designSystem({ ...look.tokens, preset: look.id });
+        }
+        const sources = await extractSources(input.sources);
         const pid = id(),
           date = now();
-        db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?,?,?)').run(
-          pid,
-          input.kind,
-          S.str(input.title || 'Untitled project', 'Title', 140, true),
-          S.str(input.brand || '', 'Brand guidance', 12000),
-          JSON.stringify(refs),
-          null,
-          date,
-          date,
-        );
+        tx(() => {
+          insertProject(db, { id: pid, kind: input.kind, title, brand, refs: JSON.stringify(refs), current_id: null, created: date, updated: date });
+          for (const s of sources) insertSource(db, id(), pid, s, date);
+          if (style) insertStyle(db, pid, style);
+        });
         return send(res, 201, { id: pid });
       }
       if (url.pathname === '/api/import' && req.method === 'POST') {
@@ -432,18 +672,11 @@ const server = http.createServer(async (req, res) => {
           warnings: ['Imported artifact: source and model quality are unverified.', ...warnings(a, references)],
         };
         // The file supplies content only. IDs, provenance and metrics are owned by Forma.
-        db.exec('BEGIN IMMEDIATE');
-        try {
-          db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?,?,?)').run(
-            pid, a.kind, a.title, '', JSON.stringify(references), rid, date, date,
-          );
+        tx(() => {
+          insertProject(db, { id: pid, kind: a.kind, title: a.title, brand: '', refs: JSON.stringify(references), current_id: rid, created: date, updated: date });
           db.prepare('INSERT INTO revisions(id,project_id,artifact,prompt,origin,metrics,created,parent_id) VALUES(?,?,?,?,?,?,?,?)')
             .run(rid, pid, JSON.stringify(a), sourceBrief, 'import', JSON.stringify(metrics), date, null);
-          db.exec('COMMIT');
-        } catch (error) {
-          db.exec('ROLLBACK');
-          throw error;
-        }
+        });
         return send(res, 201, { id: pid });
       }
       if (parts[1] === 'projects' && parts[2]) {
@@ -452,24 +685,25 @@ const server = http.createServer(async (req, res) => {
           return send(res, 200, {
             ...p,
             refs: undefined,
+            // Full lint findings and per-call metrics stay on GET .../revisions/:rid and current.
             revisions: db
               .prepare(
-                'SELECT id,prompt,origin,metrics,created FROM revisions WHERE project_id=? ORDER BY created DESC',
+                'SELECT id,parent_id,prompt,origin,metrics,created FROM revisions WHERE project_id=? ORDER BY created DESC',
               )
               .all(p.id)
-              .map((r) => ({ ...r, metrics: JSON.parse(r.metrics) })),
+              .map((r) => ({ ...r, metrics: { ...JSON.parse(r.metrics), lint: undefined, calls: undefined } })),
             current: p.current_id ? revision(p.current_id, p.id) : null,
             jobs: db
               .prepare('SELECT * FROM jobs WHERE project_id=? ORDER BY created DESC LIMIT 15')
-              .all(p.id),
+              .all(p.id)
+              .map(jobView),
+            sources: projectSources(db, p.id).map(({ created, ...s }) => s),
           });
         if (parts[3] === 'generate' && req.method === 'POST') {
           assertIdle(p.id);
-          if (
-            db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued','running')").get()
-              .n >=
-            maxQueue + maxJobs
-          )
+          const queueFull = () =>
+            db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued','running')").get().n >= maxQueue + maxJobs;
+          if (queueFull())
             return send(res, 429, {
               error: 'The pilot queue is full. Try again after a job completes.',
             });
@@ -477,21 +711,99 @@ const server = http.createServer(async (req, res) => {
             prompt = S.str(input.prompt, 'Brief', 24000, true),
             jid = id(),
             date = now();
-          db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(
-            jid,
-            p.id,
-            prompt,
-            input.review === false ? 0 : 1,
-            p.current_id,
-            'queued',
-            'Waiting for a worker',
-            null,
-            null,
-            date,
-            date,
-          );
+          let kind = 'generate',
+            options = {};
+          if (input.directions != null) {
+            if (!Number.isInteger(input.directions) || input.directions < 2 || input.directions > 4)
+              S.fail('Directions must be a whole number from 2 to 4.');
+            if (p.kind !== 'web') S.fail('Directions are available for web prototypes only.');
+            kind = 'directions';
+            options = { count: input.directions };
+          }
+          // Re-check inside the write transaction: two requests can both pass the check above while reading bodies.
+          tx(() => {
+            assertIdle(p.id);
+            if (queueFull())
+              throw Object.assign(new Error('The pilot queue is full. Try again after a job completes.'), { status: 429 });
+            db.prepare(
+              'INSERT INTO jobs(id,project_id,prompt,review,base_id,status,stage,error,result_id,created,updated,kind,options,progress,result_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            ).run(
+              jid,
+              p.id,
+              prompt,
+              input.review === false || kind === 'directions' ? 0 : 1,
+              db.prepare('SELECT current_id FROM projects WHERE id=?').get(p.id).current_id,
+              'queued',
+              'Waiting for a worker',
+              null,
+              null,
+              date,
+              date,
+              kind,
+              JSON.stringify(options),
+              JSON.stringify({ phase: 'queued', label: 'Waiting for a worker', done: null, total: null, chars: null, calls: 0 }),
+              '[]',
+            );
+          });
           pump();
-          return send(res, 202, { id: jid });
+          return send(res, 202, { id: jid, kind });
+        }
+        if (parts[3] === 'element-edit' && req.method === 'POST') {
+          if (cfg.mode === 'demo')
+            return send(res, 409, {
+              error: 'GLM element edits need MODEL_MODE=glm. Demo mode does not call a model; edit the element with the inspector instead.',
+            });
+          assertIdle(p.id);
+          // A synchronous model call takes a worker slot, so jobs and element edits share MAX_CONCURRENT_JOBS.
+          if (running >= maxJobs)
+            return send(res, 429, {
+              error: 'All generation workers are busy. Try the element edit again when a job finishes.',
+            });
+          running++;
+          const controller = new AbortController();
+          res.on('close', () => {
+            if (!res.writableEnded) controller.abort(); // the client disconnected
+          });
+          try {
+            const input = await body(req, 100000),
+              r = revision(S.str(input.revisionId, 'Revision', 100, true), p.id);
+            if (r.artifact.kind !== 'web') S.fail('Element edits are available for web prototypes only.');
+            const screen = S.str(input.screen, 'Screen', 48, true);
+            if (!S.webScreens(r.artifact).some((s) => s.id === screen)) S.fail('Element screen is not in this revision.');
+            const element = S.str(input.element, 'Element HTML', 20000, true),
+              instruction = S.str(input.instruction, 'Instruction', 4000, true);
+            p.history = briefHistory(db, p.id, r.id);
+            p.sources = projectSources(db, p.id, true).map((s) => ({ name: s.name, text: s.text }));
+            const metrics = { mode: cfg.mode, model: cfg.model, modelCalls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0 },
+              start = Date.now();
+            const out = await (M.editElement || glmPipeline().editElement)(cfg, p, r.artifact, { screen, element, instruction }, {
+              signal: controller.signal,
+              metrics,
+              onStage: () => {},
+            });
+            if (controller.signal.aborted) return;
+            if (typeof out?.html !== 'string' || !out.html.trim())
+              throw new Error('GLM did not return the edited element in the expected format.');
+            // Already sanitized by the pipeline; checked again because model output is untrusted.
+            return send(res, 200, {
+              html: S.safeHTML(out.html),
+              css: S.safeCSS(typeof out.css === 'string' ? out.css : ''),
+              notes: String(out.notes || '').slice(0, 3000),
+              metrics: {
+                modelCalls: metrics.modelCalls,
+                inputTokens: metrics.inputTokens,
+                outputTokens: metrics.outputTokens,
+                reasoningTokens: metrics.reasoningTokens || 0,
+                durationSeconds: Math.round((Date.now() - start) / 1000),
+              },
+            });
+          } catch (e) {
+            if (controller.signal.aborted) return;
+            throw e;
+          } finally {
+            running--;
+            setImmediate(pump);
+          }
         }
         if (parts[3] === 'revisions' && parts[4] && req.method === 'GET')
           return send(res, 200, revision(parts[4], p.id));
@@ -503,9 +815,14 @@ const server = http.createServer(async (req, res) => {
               error: 'The project changed. Reload the latest revision before saving.',
             });
           const a = S.artifact(input.artifact, p.kind);
+          const note = S.str(input.note || '', 'Note', 300).trim();
+          // mode keeps the base revision's mode: evaluations attribute cleaned-up output to its
+          // source and demo-mode controls depend on it. manual marks who made this revision.
           const inherited = p.current_id ? revision(p.current_id, p.id).metrics.mode : 'manual';
-          const rid = commit(p, a, 'Manual edit', 'manual', {
+          const rid = commit(p, a, manualPrompt(note), 'manual', {
             mode: inherited,
+            manual: true,
+            ...(note ? { note } : {}),
             warnings: [
               'Manual edit: native rendering and visual review have not been rerun.',
               ...warnings(a, p.references),
@@ -521,6 +838,9 @@ const server = http.createServer(async (req, res) => {
             r = revision(input.revisionId, p.id);
           const rid = commit(p, r.artifact, `Restored revision ${r.id}`, 'restore', {
             ...r.metrics,
+            direction: undefined,
+            manual: undefined,
+            note: undefined,
             render: null,
             warnings: ['Restored content. Render again to regenerate native previews.'],
           }, id(), r.id);
@@ -582,16 +902,11 @@ const server = http.createServer(async (req, res) => {
             new AbortController().signal,
           );
           await saveRender(r.id, render);
-          r.metrics.render = {
-            pageCount: render.pageCount,
-            screenshots: render.screenshots.length,
-            basis: render.basis,
-            views: render.views || [],
-            ...render.metrics,
-          };
+          r.metrics.render = renderSummary(render);
           r.metrics.warnings = (r.metrics.warnings || []).filter(
             (w) => !w.startsWith('Rendering unavailable') && !w.startsWith('Manual edit:'),
           );
+          applyLint(r.metrics, r.artifact, render);
           db.prepare('UPDATE revisions SET metrics=? WHERE id=?').run(
             JSON.stringify(r.metrics),
             r.id,
@@ -623,7 +938,7 @@ const server = http.createServer(async (req, res) => {
             kind: p.kind,
             title: p.title,
           };
-          db.prepare('INSERT INTO evaluations VALUES(?,?,?,?)').run(
+          db.prepare('INSERT INTO evaluations(id,revision_id,data,created) VALUES(?,?,?,?)').run(
             id(),
             r.id,
             JSON.stringify(value),
@@ -641,7 +956,7 @@ const server = http.createServer(async (req, res) => {
           else if (job.status === 'running') controllers.get(job.id)?.abort();
           return send(res, 200, { ok: true });
         }
-        if (req.method === 'GET') return send(res, 200, job);
+        if (req.method === 'GET') return send(res, 200, jobView(job));
       }
       if (url.pathname === '/api/evaluations' && req.method === 'GET')
         return send(
@@ -727,4 +1042,7 @@ process.on('SIGTERM', () => {
     db.close();
     process.exit(0);
   });
+  // Keep-alive and in-flight requests (element edits) would otherwise hold the process open.
+  server.closeIdleConnections();
+  setTimeout(() => server.closeAllConnections(), 1000).unref();
 });

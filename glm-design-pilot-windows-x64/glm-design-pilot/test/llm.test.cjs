@@ -348,7 +348,7 @@ test('SSE parser handles arbitrary chunking directly, including a CR split from 
   crp.end();
   assert.deepEqual(crEvents, [
     { event: 'error', data: 'one\ntwo' },
-    { event: 'message', data: 'x' },
+    { event: 'message', data: 'x', partial: true },
   ]);
 });
 
@@ -1057,4 +1057,228 @@ test('parseBlocks stays linear on hostile input', () => {
     assert.ok(b.notes.length <= 4000);
   }
   assert.ok(Date.now() - t0 < 4000, `${Date.now() - t0}ms`);
+});
+
+// ---- review regressions ---------------------------------------------------
+
+test('HTTP error detail keeps the first 300 characters of a long body', async (t) => {
+  const long = JSON.stringify({ error: { message: 'This model maximum context length is 1000 tokens. ' + 'x'.repeat(2000) } });
+  const s = await serve((req, res) => reply(res, long, 400));
+  t.after(s.close);
+  const e = await L.chat(cfgFor(s.base, { GLM_STREAM: 'false' }), MSGS, {}).catch((x) => x);
+  assert.equal(e.status, 400);
+  assert.equal(e.detail, long.slice(0, 300));
+});
+
+test('a body that ends cleanly in the middle of an event is a dropped connection and is retried', async (t) => {
+  let mode = 'cut',
+    cuts = 1;
+  const s = await serve((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    if (mode === 'cut') return res.end(cuts-- > 0 ? 'data: {"choices":[{"index":0,"delta":{"content":"hel' : simpleStream('whole'));
+    // finish_reason arrived; only the trailing usage chunk was cut off
+    res.end(ssePayload([chunk({ content: 'kept' }, 'stop')]) + 'data: {"choices":[],"usage":{"prompt_');
+  });
+  t.after(s.close);
+  const sleeps = [];
+  const r = await L.chat(cfgFor(s.base), MSGS, { sleep: noSleep(sleeps) });
+  assert.equal(r.text, 'whole');
+  assert.equal(r.retries, 1);
+  assert.deepEqual(sleeps, [1000]);
+  cuts = 1;
+  const e = await L.chat(cfgFor(s.base, { GLM_RETRIES: '0' }), MSGS, {}).catch((x) => x);
+  assert.equal(e.code, 'network', 'without retries it is reported as dropped');
+  assert.equal(e.message, 'GLM closed the connection before the response finished.');
+  mode = 'usage';
+  const before = s.calls.length;
+  assert.equal((await L.chat(cfgFor(s.base), MSGS, { sleep: noSleep() })).text, 'kept');
+  assert.equal(s.calls.length - before, 1);
+  // The same rule applies to an SSE body behind a proxy that relabels it as JSON.
+  const p = await serve((req, res, body, n) => writeSSE(res, n === 1 ? 'data: {"choices":[{"index":0,"delta":{"content":"x' : simpleStream('ok'), { type: 'application/json' }));
+  t.after(p.close);
+  assert.equal((await L.chat(cfgFor(p.base), MSGS, { sleep: noSleep() })).text, 'ok');
+});
+
+test('a finished stream that the server never closes returns after a grace period', async (t) => {
+  const grace = L._internal.TUNING.grace;
+  t.after(() => (L._internal.TUNING.grace = grace));
+  L._internal.TUNING.grace = 200;
+  const s = await serve((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write(ssePayload([chunk({ content: 'finished' }, 'stop')]));
+    const keep = setInterval(() => !res.destroyed && res.write(': ping\n\n'), 50); // keep-alives do not extend the grace
+    res.on('close', () => clearInterval(keep));
+  });
+  t.after(s.close);
+  const metrics = {};
+  let started = Date.now();
+  const r = await L.chat(cfgFor(s.base), MSGS, { metrics });
+  assert.equal(r.text, 'finished');
+  assert.equal(r.finishReason, 'stop');
+  assert.ok(Date.now() - started < 1500, `${Date.now() - started}ms`);
+  assert.equal(metrics.modelCalls, 1);
+  // The overall timeout firing during the grace period keeps the finished answer...
+  L._internal.TUNING.grace = 60000;
+  const cfg = cfgFor(s.base);
+  cfg.timeout = 300;
+  started = Date.now();
+  assert.equal((await L.chat(cfg, MSGS, {})).text, 'finished');
+  assert.ok(Date.now() - started < 1500);
+  const cut = await serve((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write(ssePayload([chunk({ content: '<forma-screen id="a">' }, 'length')]));
+  });
+  t.after(cut.close);
+  const lc = cfgFor(cut.base);
+  lc.timeout = 300;
+  await assert.rejects(L.chat(lc, MSGS, {}), { code: 'length', partial: '<forma-screen id="a">' }, 'not reported as a timeout');
+  // ...but a user cancel still wins.
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 150);
+  await assert.rejects(L.chat(cfgFor(s.base), MSGS, { signal: ac.signal }), { code: 'cancelled' });
+});
+
+test('vision support is remembered only from completed responses, not from a 200 status', async (t) => {
+  const s = await serve((req, res, body) =>
+    imagesIn(body)
+      ? writeSSE(res, ssePayload([{ error: { message: 'This model does not support image input', type: 'BadRequestError', code: 400 } }]))
+      : writeSSE(res, simpleStream('text answer')),
+  );
+  t.after(s.close);
+  const cfg = cfgFor(s.base);
+  const r = await L.chat(cfg, withImages(2), {});
+  assert.equal(r.text, 'text answer');
+  assert.equal(r.imagesDropped, 2);
+  assert.equal(s.calls.length, 2);
+  assert.equal(L.visionSupported(cfg), false, 'the 200 status before the mid-stream error did not count');
+  await L.chat(cfg, withImages(1), {});
+  assert.equal(s.calls.length, 3, 'later image calls skip the failing round trip');
+  assert.equal(imagesIn(s.calls[2].body), 0);
+});
+
+test('error objects in 200 bodies map to the right status: numeric fields first, then the text', async (t) => {
+  let error;
+  const s = await serve((req, res) => reply(res, { error }));
+  t.after(s.close);
+  const cases = [
+    [{ code: 'model_not_found', status: 404, message: 'The model does not exist' }, 404, 1],
+    [{ code: 'server_error', status: '503', message: 'oops' }, 503, 2],
+    ['Rate limit exceeded, slow down', 429, 2],
+    [{ message: 'Invalid API key provided' }, 401, 1],
+    [{ message: 'The model `x` does not exist' }, 404, 1],
+    [{ message: { reason: 'nested object' } }, 500, 2],
+  ];
+  for (const [err, status, calls] of cases) {
+    error = err;
+    const before = s.calls.length;
+    const e = await L.chat(cfgFor(s.base, { GLM_STREAM: 'false', GLM_RETRIES: '1' }), MSGS, { sleep: noSleep() }).catch((x) => x);
+    assert.equal(e.status, status, JSON.stringify(err));
+    assert.equal(s.calls.length - before, calls, `${JSON.stringify(err)} attempts`);
+    assert.ok(e.detail.length > 0);
+  }
+  assert.equal(L.extractJSON(L.extractJSON(JSON.stringify(JSON.stringify({ reason: 1 })))).reason, 1);
+});
+
+test('extendConfig rejects hex, exponent and signed numbers', () => {
+  for (const v of ['0x2', '1e0', '+3', '2.0', '1_0'])
+    assert.throws(() => cfgFor('http://x/v1', { GLM_RETRIES: v }), { message: 'Invalid GLM_RETRIES. Use a whole number from 0 to 5.' }, v);
+  assert.equal(cfgFor('http://x/v1', { GLM_MAX_IMAGES: ' 12 ' }).maxImages, 12);
+});
+
+test('extractJSON never returns an inner array of a truncated or invalid object', () => {
+  const bad = [
+    '{"title": "x", "screens": [{"id": "a"}, {"id": "b"}], "notes": "cut',
+    'The keys {"title" and "screens" are required.\n{"title": "x", "screens": []}',
+    '{"a": nope, "list": [{"x": 1}]}',
+  ];
+  for (const s of bad) assert.throws(() => L.extractJSON(s), { message: 'The model did not return valid JSON.' }, s);
+  assert.deepEqual(L.extractJSON('Steps: ["one", "two"]'), ['one', 'two'], 'arrays still work when no object is present');
+});
+
+test('extractJSON tolerates raw newlines and tabs inside strings', () => {
+  assert.deepEqual(L.extractJSON('{"html": "<main>\n\t<h1>Hi</h1>\n</main>", "n": 1,}'), { html: '<main>\n\t<h1>Hi</h1>\n</main>', n: 1 });
+  assert.deepEqual(L.extractJSON('Plan:\n```json\n{"summary": "line one\nline two"}\n```'), { summary: 'line one\nline two' });
+  assert.deepEqual(L.extractJSON('{"a": "\u0001"}'), { a: '\u0001' });
+  assert.equal(L._internal.dropTrailingCommas('{"a": "x\ny",}'), '{"a": "x\\ny"}');
+});
+
+test('parseBlocks reads a block glued to a fence and blocks closed with the wrong tag', () => {
+  let b = L.parseBlocks('```<forma-css>\n.a{}\n</forma-css>\n```<forma-screen id="s"><p>S</p></forma-screen>```');
+  assert.equal(b.css, '.a{}');
+  assert.deepEqual(b.screens, [{ id: 's', name: '', html: '<p>S</p>' }]);
+  assert.equal(b.notes, '');
+  b = L.parseBlocks('<forma-element><button class="btn">Go</button></forma-screen>\n<forma-css>.b{}</forma-css>');
+  assert.equal(b.element, '<button class="btn">Go</button>');
+  assert.equal(b.css, '.b{}');
+  assert.equal(b.truncated, false);
+  assert.match(b.notes, /<forma-element> block was closed with <\/forma-screen>/);
+  b = L.parseBlocks('<forma-screen id="a"><p>A</p></forma-css><forma-screen id="b"><p title="x">B</p></forma-element>');
+  assert.deepEqual(b.screens.map((s) => [s.id, s.html]), [
+    ['a', '<p>A</p>'],
+    ['b', '<p title="x">B</p>'],
+  ]);
+  b = L.parseBlocks('<forma-css>.c{}</forma-meta>');
+  assert.equal(b.css, '.c{}');
+  assert.equal(L.parseBlocks('<forma-screen id="a">``` html\n<p>x</p>\n```</forma-screen>').screens[0].html, '<p>x</p>');
+});
+
+test('parseBlocks keeps block tags inside meta JSON strings as text', () => {
+  let b = L.parseBlocks('<forma-meta>{"title": "T", "summary": "Rebuilt the <forma-screen> for settings and the </forma-css> rules"}</forma-meta>\n<forma-screen id="s"><p>S</p></forma-screen>');
+  assert.deepEqual(b.meta, { title: 'T', summary: 'Rebuilt the <forma-screen> for settings and the </forma-css> rules' });
+  assert.deepEqual(b.screens, [{ id: 's', name: '', html: '<p>S</p>' }]);
+  assert.equal(b.truncated, false);
+  assert.equal(b.notes, '');
+  // An unclosed meta followed by a real block still ends at that block.
+  b = L.parseBlocks('<forma-meta>{"title": "T"}\n<forma-screen id="s"><p>S</p></forma-screen>');
+  assert.deepEqual([b.meta, b.screens.length], [{ title: 'T' }, 1]);
+  b = L.parseBlocks('<forma-meta>{"title": "T"\n<forma-screen id="s"><p>S</p></forma-screen><forma-meta>{"x": 1}</forma-meta>');
+  assert.deepEqual(b.meta, { x: 1 });
+  assert.deepEqual(b.screens.map((s) => s.id), ['s']);
+});
+
+test('parseBlocks drops prototype keys from meta and caps problem notes', () => {
+  const b = L.parseBlocks('<forma-meta>{"__proto__": {"polluted": true}, "constructor": 1, "prototype": 2, "title": "T"}</forma-meta>');
+  assert.deepEqual(Object.keys(b.meta), ['title']);
+  assert.equal(Object.getPrototypeOf(b.meta), Object.prototype);
+  assert.equal(Object.assign({}, b.meta).polluted, undefined);
+  const many = L.parseBlocks('<forma-screen id="a"><p>x</p></forma-css>'.repeat(500));
+  assert.equal(many.notes.split('\n').length, 10);
+});
+
+test('parseBlocks stays linear on hostile meta, mismatch and fence input', () => {
+  const inputs = [
+    '<forma-meta>{"a":'.repeat(100000) + '</forma-meta>',
+    '<forma-meta>{"s": "<forma-screen>'.repeat(60000) + '"}</forma-meta>',
+    '<forma-screen id="a"><p>x</p></forma-css>'.repeat(60000),
+    '```<forma-css>'.repeat(100000),
+    '<forma-meta>{"a": "</forma-screen>"'.repeat(60000),
+  ];
+  const t0 = Date.now();
+  for (const s of inputs) assert.ok(L.parseBlocks(s).notes.length <= 4000);
+  assert.ok(Date.now() - t0 < 5000, `${Date.now() - t0}ms`);
+});
+
+test('a context-length 400 on an image request falls back without images but keeps vision enabled', async (t) => {
+  const s = await serve((req, res, body) =>
+    imagesIn(body) ? reply(res, { object: 'error', message: "This model's maximum context length is 8192 tokens. However, you requested 9100 tokens.", code: 400 }, 400) : reply(res, completion('fits')),
+  );
+  t.after(s.close);
+  const cfg = cfgFor(s.base, { GLM_STREAM: 'false' });
+  const r = await L.chat(cfg, withImages(2), {});
+  assert.equal(r.text, 'fits');
+  assert.equal(r.imagesDropped, 2);
+  assert.match(textIn(s.calls[1].body), /too large with them/);
+  assert.equal(L.visionSupported(cfg), null, 'one oversized request does not disable vision for the process');
+  await L.chat(cfg, withImages(1), {});
+  assert.equal(imagesIn(s.calls[2].body), 1, 'later requests still send images');
+});
+
+test('an unusable base URL fails at once with the 0.2 network message instead of backing off', async () => {
+  for (const base of [undefined, '', 'not a url', 'ftp://127.0.0.1/v1', 'file:///etc']) {
+    const sleeps = [];
+    const e = await L.chat(baseCfg(base), MSGS, { sleep: noSleep(sleeps) }).catch((x) => x);
+    assert.equal(e.code, 'network', String(base));
+    assert.equal(e.message, 'Cannot reach GLM. Check the API URL, network route, and corporate CA configuration.');
+    assert.deepEqual(sleeps, [], String(base));
+  }
 });

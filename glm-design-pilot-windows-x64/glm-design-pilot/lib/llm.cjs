@@ -11,6 +11,9 @@ const BACKOFF = [1000, 3000];
 const MAX_WAIT = 20000;
 const MAX_CALLS = 100;
 const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+// After finish_reason, how long to wait for the usage chunk, [DONE] or the end
+// of the body before keeping the finished answer (some proxies hold streams open).
+const TUNING = { grace: 10000 };
 const VISION = new Map(); // base\nmodel -> true (images accepted) | false (rejected)
 const OWN = Symbol('forma.llm');
 const MSG = {
@@ -25,7 +28,10 @@ const MSG = {
   length: 'GLM hit the output limit. Increase GLM_MAX_TOKENS or request a smaller artifact.',
   empty: 'GLM returned an empty response.',
 };
+Object.freeze(MSG);
 const VISION_NOTE = '[Images omitted: this model endpoint does not accept image input. Work from the text only.]';
+const SIZE_NOTE = '[Images omitted: the request was too large with them. Work from the text only.]';
+const SIZE_ERROR = /context.?(length|window)|maximum context|too many (input )?tokens|prompt is too long|request too large/i;
 const fail = (code, message, extra) => Object.assign(new Error(message), { code, [OWN]: true }, extra);
 const plain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -49,8 +55,8 @@ function extendConfig(cfg, env = process.env) {
   const int = (name, def, min, max) => {
     const v = raw(name);
     if (v == null) return def;
-    const n = Number(v);
-    return Number.isInteger(n) && n >= min && n <= max ? n : bad(`Invalid ${name}. Use a whole number from ${min} to ${max}.`, def);
+    const n = /^\d{1,3}$/.test(v) ? Number(v) : NaN; // no hex, exponents or signs
+    return n >= min && n <= max ? n : bad(`Invalid ${name}. Use a whole number from ${min} to ${max}.`, def);
   };
   const one = (name, def, list) => {
     const v = raw(name)?.toLowerCase();
@@ -168,19 +174,33 @@ function pause(sleep, ms, signal) {
   return Promise.race([Promise.resolve().then(() => sleep(ms, signal)), aborted]).finally(() => signal.removeEventListener('abort', stop));
 }
 
+// HTTP-style status for an error object sent in a 200 body or mid-stream. Any
+// numeric code/status field wins (a string `code` such as "model_not_found"
+// must not hide a numeric `status`); otherwise the text decides.
 function statusOf(err) {
-  const n = Number(err?.code ?? err?.status ?? err?.status_code);
-  if (Number.isInteger(n) && n >= 400 && n <= 599) return n;
-  const s = `${err?.type || ''} ${err?.code || ''} ${err?.message || ''}`;
+  if (plain(err))
+    for (const v of [err.code, err.status, err.status_code, err.statusCode]) {
+      const n = typeof v === 'number' || (typeof v === 'string' && /^\d{3}$/.test(v.trim())) ? Number(v) : NaN;
+      if (Number.isInteger(n) && n >= 400 && n <= 599) return n;
+    }
+  const s = plain(err) ? `${err.type || ''} ${err.code || ''} ${typeof err.message === 'string' ? err.message : ''}` : String(err ?? '');
   if (/rate.?limit|too.?many/i.test(s)) return 429;
   if (/overload|unavailable|capacity/i.test(s)) return 503;
-  if (/invalid|bad.?request|validation|context.?length/i.test(s)) return 400;
+  if (/unauthori[sz]ed|authentication|api.?key/i.test(s)) return 401;
+  if (/forbidden|permission.?denied/i.test(s)) return 403;
+  if (/not.?found|does not exist/i.test(s)) return 404;
+  if (/invalid|bad.?request|validation|context.?length|not support/i.test(s)) return 400;
   return 500;
 }
 function errorEvent(err) {
   const status = statusOf(err);
-  const detail = String((plain(err) ? err.message : err) || '').slice(0, 300);
-  return fail('http', MSG.http(status), { status, retryable: RETRY_STATUS.has(status), detail, midStream: true });
+  const m = plain(err) ? err.message : err;
+  let detail = typeof m === 'string' ? m : '';
+  if (!detail && m != null)
+    try {
+      detail = JSON.stringify(m) || '';
+    } catch {}
+  return fail('http', MSG.http(status), { status, retryable: RETRY_STATUS.has(status), detail: detail.slice(0, 300), midStream: true });
 }
 const parts = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (typeof x === 'string' ? x : typeof x?.text === 'string' ? x.text : '')).join('') : '');
 // Some servers send both fields with the same text; prefer reasoning_content.
@@ -192,7 +212,8 @@ const reasoningOf = (d) => (typeof d?.reasoning_content === 'string' && d.reason
 // chunking (CR, LF or CRLF, also split across chunks); onEvent({event, data})
 // returns true to stop. Only new text is scanned and partial lines are kept as
 // pieces, so tiny chunks of a long line stay linear. Lines and events are
-// capped at `limit` characters.
+// capped at `limit` characters. An event cut off by the end of the body (no
+// blank line) is still delivered, flagged `partial: true`.
 function sseParser(onEvent, limit = LIMIT) {
   let pending = [],
     pendingLen = 0,
@@ -201,10 +222,11 @@ function sseParser(onEvent, limit = LIMIT) {
     size = 0,
     has = false,
     event = '',
-    stopped = false;
+    stopped = false,
+    partial = false;
   const line = (l) => {
     if (!l) {
-      if (has && !stopped) stopped = !!onEvent({ event: event || 'message', data: data.join('\n') });
+      if (has && !stopped) stopped = !!onEvent({ event: event || 'message', data: data.join('\n'), ...(partial ? { partial } : {}) });
       data = [];
       size = 0;
       has = false;
@@ -257,13 +279,14 @@ function sseParser(onEvent, limit = LIMIT) {
       if (stopped) return;
       if (pending.length) line(pending.join(''));
       pending = [];
+      partial = true;
       if (!stopped) line('');
     },
   };
   return self;
 }
 
-function onEvent(acc, { event, data }, progress) {
+function onEvent(acc, { event, data, partial }, progress) {
   const d = data.trim();
   if (!d) return false;
   if (d === '[DONE]') return (acc.done = true);
@@ -273,6 +296,12 @@ function onEvent(acc, { event, data }, progress) {
   } catch {
     if (event === 'error') throw errorEvent({ message: d });
     if (event !== 'message') return false;
+    // The body ended in the middle of an event: a dropped connection (a proxy
+    // closing cleanly mid-line), not a server that speaks something else.
+    if (partial) {
+      if (acc.finishReason) return true; // only the trailing usage chunk was cut off
+      throw fail('network', MSG.dropped, { retryable: true });
+    }
     throw fail('http', MSG.nonJSON, { status: 200 });
   }
   if (!plain(obj)) {
@@ -283,7 +312,7 @@ function onEvent(acc, { event, data }, progress) {
   if (err) throw errorEvent(err);
   if (plain(obj.usage)) acc.usage = obj.usage;
   for (const c of Array.isArray(obj.choices) ? obj.choices : []) {
-    if (!plain(c) || (c.index ?? 0) !== 0) continue;
+    if (!plain(c) || Number(c.index ?? 0) !== 0) continue;
     const delta = c.delta || c.message || {};
     acc.content += parts(delta.content);
     acc.reasoning += reasoningOf(delta);
@@ -298,21 +327,36 @@ function finishSSE(acc) {
   if (!acc.done && !acc.finishReason) throw fail('network', MSG.dropped, { retryable: true });
   return acc;
 }
+const LATE = Symbol('late');
+// reader.read(), or LATE once `ms` pass without a chunk.
+function readWithin(reader, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(LATE), Math.max(0, ms));
+    reader.read().then(
+      (v) => (clearTimeout(timer), resolve(v)),
+      (e) => (clearTimeout(timer), reject(e)),
+    );
+  });
+}
 async function readStream(res, progress) {
   const acc = blank();
   if (!res.body) return finishSSE(acc);
   const parser = sseParser((ev) => onEvent(acc, ev, progress));
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let ended = false;
+  let ended = false,
+    deadline = 0;
   try {
     for (;;) {
       let chunk;
+      if (acc.finishReason && !deadline) deadline = Date.now() + TUNING.grace;
       try {
-        chunk = await reader.read();
+        chunk = deadline ? await readWithin(reader, deadline - Date.now()) : await reader.read();
       } catch (e) {
+        if (acc.finishReason) break; // the answer was complete; chat() still honours a user cancel
         throw fail('network', MSG.dropped, { retryable: true, cause: e });
       }
+      if (chunk === LATE) break; // finished answer, but the server never closed the stream
       if (chunk.done) {
         ended = true;
         parser.push(decoder.decode());
@@ -354,7 +398,7 @@ async function readJSON(res, progress) {
     data = JSON.parse(raw);
   } catch {
     // A proxy may strip the event-stream content type; parse SSE text anyway.
-    if (/^\s*(?::|data:|event:)/.test(raw)) {
+    if (/^\s*(?::|data:|event:|id:|retry:)/.test(raw)) {
       const acc = blank();
       const parser = sseParser((ev) => onEvent(acc, ev, progress));
       parser.push(raw);
@@ -372,19 +416,37 @@ async function readJSON(res, progress) {
   progress(acc);
   return acc;
 }
+// The first `max` characters of an error body (the rest is never downloaded).
 async function readCapped(res, max) {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
   try {
-    const text = await readText(res, max);
-    return text.slice(0, max);
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) return (text + decoder.decode()).slice(0, max);
+      text += decoder.decode(chunk.value, { stream: true });
+      if (text.length >= max) return text.slice(0, max);
+    }
   } catch {
-    return '';
+    return text.slice(0, max);
+  } finally {
+    reader.cancel().catch(() => {});
   }
 }
 
-async function attempt(cfg, body, signal, progress, onStatus) {
+async function attempt(cfg, body, signal, progress) {
+  let url;
+  try {
+    url = new URL(String(cfg.base).replace(/\/$/, '') + '/chat/completions');
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('protocol');
+  } catch (e) {
+    throw fail('network', MSG.network, { cause: e }); // a bad URL never heals: no retry
+  }
   let res;
   try {
-    res = await fetch(String(cfg.base).replace(/\/$/, '') + '/chat/completions', {
+    res = await fetch(url, {
       method: 'POST',
       redirect: 'error',
       headers: {
@@ -398,7 +460,6 @@ async function attempt(cfg, body, signal, progress, onStatus) {
   } catch (e) {
     throw fail('network', MSG.network, { retryable: true, cause: e });
   }
-  onStatus(res.status);
   if (!res.ok) {
     const detail = (await readCapped(res, 300)).trim();
     throw fail('http', MSG.http(res.status), { status: res.status, retryable: RETRY_STATUS.has(res.status), retryAfter: retryAfter(res.headers.get('retry-after')), detail });
@@ -470,19 +531,22 @@ async function chat(cfg, messages, opts = {}) {
       if (signal.aborted) throw classify();
       const images = countImages(msgs);
       try {
-        raw = await attempt(cfg, requestBody(cfg, msgs, opts, stage, stream), signal, progress, (status) => {
-          if (status === 400) return;
-          if (images && status >= 200 && status < 300 && !VISION.has(key)) VISION.set(key, true);
-          if (fellBack && !images && VISION.get(key) !== true) VISION.set(key, false);
-        });
+        raw = await attempt(cfg, requestBody(cfg, msgs, opts, stage, stream), signal, progress);
+        // Remember vision support only from a completed response: a 200 status
+        // can still be followed by a mid-stream "images not supported" error.
+        if (images && !VISION.has(key)) VISION.set(key, true);
+        if (fellBack === 'vision' && !images && VISION.get(key) !== true) VISION.set(key, false);
         break;
       } catch (e0) {
         const e = classify(e0);
         if (e.code === 'cancelled' || e.code === 'timeout') throw e;
         if (e.code === 'http' && e.status === 400 && images && vision === 'auto' && !fellBack) {
-          msgs = stripImages(msgs, VISION_NOTE);
+          // A context-length 400 says nothing about image support: retry
+          // without images but do not disable vision for the process.
+          const size = SIZE_ERROR.test(e.detail || '');
+          msgs = stripImages(msgs, size ? SIZE_NOTE : VISION_NOTE);
           dropped += images;
-          fellBack = true;
+          fellBack = size ? 'size' : 'vision';
           continue;
         }
         if (!e.retryable || retries >= limit) throw e;
@@ -494,6 +558,7 @@ async function chat(cfg, messages, opts = {}) {
         }
       }
     }
+    if (user?.aborted) throw classify();
     usage = tokens(raw.usage);
     if (metrics) {
       metrics.modelCalls = (metrics.modelCalls || 0) + 1;
@@ -509,7 +574,9 @@ async function chat(cfg, messages, opts = {}) {
     record();
     return result;
   } catch (e0) {
-    const e = classify(e0);
+    // Errors raised above are already classified; a length or empty answer
+    // that completed just before the timer fired must not become a timeout.
+    const e = e0?.[OWN] ? e0 : classify(e0);
     if (e.code !== 'cancelled') record(e.code);
     throw e;
   }
@@ -560,7 +627,9 @@ const stripThinking = (text) => splitThinking(text).text;
 
 // ---- JSON -----------------------------------------------------------------
 
-// Removes commas directly before } or ] outside strings.
+const CTRL = { '\n': '\\n', '\r': '\\r', '\t': '\\t', '\b': '\\b', '\f': '\\f' };
+// Repairs two common model slips: commas directly before } or ] (outside
+// strings) and raw control characters such as newlines inside strings.
 function dropTrailingCommas(s) {
   const out = [];
   let str = false;
@@ -568,6 +637,7 @@ function dropTrailingCommas(s) {
     const c = s[i];
     if (str) {
       if (c === '\\') out.push(c, s[++i] ?? '');
+      else if (c < ' ') out.push(CTRL[c] || `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
       else {
         if (c === '"') str = false;
         out.push(c);
@@ -584,11 +654,15 @@ function dropTrailingCommas(s) {
   }
   return out.join('');
 }
+// `s` is trimmed. An object or array that does not end with its closing
+// bracket cannot parse, so skip the (exception-heavy) attempts.
 function parseLoose(s) {
+  const bracket = s[0] === '{' ? '}' : s[0] === '[' ? ']' : '';
+  if (bracket && s.at(-1) !== bracket) return null;
   try {
     return { value: JSON.parse(s) };
   } catch {}
-  if (s[0] !== '{' && s[0] !== '[') return null;
+  if (!bracket) return null;
   try {
     return { value: JSON.parse(dropTrailingCommas(s)) };
   } catch {
@@ -616,24 +690,25 @@ function startsJSON(t, s, open) {
   while (j < t.length && (t[j] === ' ' || t[j] === '\n' || t[j] === '\r' || t[j] === '\t')) j++;
   return open === '{' ? t[j] === '"' || t[j] === '}' : t[j] === '{' || t[j] === '[' || t[j] === '"' || t[j] === ']';
 }
+// -> { hit: {value} | null, tries }: tries counts plausible starts examined.
 function scanFor(t, open, close) {
   let from = 0,
     tries = 0;
   while (tries < 50) {
     const s = t.indexOf(open, from);
-    if (s < 0) return null;
+    if (s < 0) break;
     if (!startsJSON(t, s, open)) {
       from = s + 1;
       continue;
     }
     tries++;
     const e = matchEnd(t, s, open, close);
-    if (e < 0) return null; // unbalanced: everything after is inside a truncated value
+    if (e < 0) break; // unbalanced: everything after is inside a truncated value
     const r = parseLoose(t.slice(s, e + 1));
-    if (r && r.value !== null && typeof r.value === 'object') return r;
+    if (r && r.value !== null && typeof r.value === 'object') return { hit: r, tries };
     from = e + 1; // skip the whole unit so nested objects are never mistaken for the answer
   }
-  return null;
+  return { hit: null, tries };
 }
 function fences(t) {
   const out = [];
@@ -650,18 +725,28 @@ function fences(t) {
   }
   return out.sort((x, y) => y.json - x.json);
 }
-function extractJSON(text) {
-  if (typeof text !== 'string') throw new Error('The model returned no text content.');
+// Non-throwing core of extractJSON: { value } or null. Arrays are a fallback
+// only when the text has no object start at all, so the inner array of a
+// truncated or invalid object is never returned as the answer.
+function findJSON(text) {
+  if (typeof text !== 'string') return null;
   const t = stripThinking(text).replace(/^\uFEFF/, '').trim();
   let r = parseLoose(t);
-  if (r) return r.value;
+  if (r) return r;
   for (const f of fences(t)) {
-    r = parseLoose(f.body.trim()) || scanFor(f.body, '{', '}');
-    if (r) return r.value;
+    const body = f.body.trim();
+    r = parseLoose(body) || scanFor(body, '{', '}').hit;
+    if (r) return r;
   }
-  r = scanFor(t, '{', '}') || scanFor(t, '[', ']');
-  if (r) return r.value;
-  throw new Error('The model did not return valid JSON.');
+  const o = scanFor(t, '{', '}');
+  if (o.hit || o.tries) return o.hit;
+  return scanFor(t, '[', ']').hit;
+}
+function extractJSON(text) {
+  if (typeof text !== 'string') throw new Error('The model returned no text content.');
+  const r = findJSON(text);
+  if (!r) throw new Error('The model did not return valid JSON.');
+  return r.value;
 }
 
 // ---- tagged blocks --------------------------------------------------------
@@ -670,8 +755,13 @@ const KINDS = ['css', 'screen', 'remove', 'element', 'meta'];
 const START = /<forma-(css|screen|remove|element|meta)(?=[\s>/])/gi;
 const START_Y = /<forma-(?:css|screen|remove|element|meta)(?=[\s>/])/iy;
 const CLOSE_G = Object.fromEntries(KINDS.map((k) => [k, new RegExp(`</forma-${k}\\s*>`, 'gi')]));
-const CLOSE_Y = Object.fromEntries(KINDS.map((k) => [k, new RegExp(`</forma-${k}\\s*>`, 'iy')]));
+// Any block's closing tag: a block closed with the wrong tag (a common slip,
+// "<forma-element>…</forma-screen>") still ends there instead of running on.
+const ANY_CLOSE_G = /<\/forma-(css|screen|remove|element|meta)\s*>/gi;
+const ANY_CLOSE_Y = /<\/forma-(css|screen|remove|element|meta)\s*>/iy;
 const STRAY_CLOSE = /<\/forma-(?:css|screen|remove|element|meta)\s*>/gi;
+const FENCE_LINE = /^[ \t]*```[ \t]*[\w+-]*[ \t]*$/gm;
+const META_UNSAFE = new Set(['__proto__', 'constructor', 'prototype']);
 // Quoted values may hold '>' but not '<' or a newline; anything else falls
 // back to the lenient form, which ends at the first '>'.
 const TAG_STRICT = /((?:\s+[^\s=>/"'<]+(?:\s*=\s*(?:"[^"\n<]*"|'[^'\n<]*'|[^\s"'<>/]*))?)*)\s*(\/?)>/y;
@@ -717,14 +807,17 @@ function tagEnd(t, i, find) {
 }
 // HTML-aware search for the end of a screen/element block, so a closing tag
 // inside an attribute value or comment does not end the block early.
+function closedAt(kind, at, m) {
+  const by = m[1].toLowerCase();
+  return { end: at, next: at + m[0].length, how: by === kind ? 'closed' : 'mismatch', by };
+}
 function htmlEnd(t, from, kind, find) {
-  const close = CLOSE_Y[kind];
   for (let i = from; ; ) {
     const j = t.indexOf('<', i);
     if (j < 0) return null;
-    close.lastIndex = j;
-    const m = close.exec(t);
-    if (m) return { end: j, next: j + m[0].length, how: 'closed' };
+    ANY_CLOSE_Y.lastIndex = j;
+    const m = ANY_CLOSE_Y.exec(t);
+    if (m) return closedAt(kind, j, m);
     START_Y.lastIndex = j;
     if (START_Y.test(t)) return { end: j, next: j, how: 'implicit' };
     if (t.startsWith('<!--', j)) {
@@ -752,7 +845,7 @@ function finder(t) {
     if (!hit(cache[key], from)) {
       re.lastIndex = from;
       const m = re.exec(t);
-      cache[key] = { from, index: m ? m.index : -1, len: m ? m[0].length : 0 };
+      cache[key] = { from, index: m ? m.index : -1, len: m ? m[0].length : 0, m };
     }
     return cache[key].index < 0 ? null : cache[key];
   };
@@ -761,20 +854,32 @@ function finder(t) {
     if (!hit(cache[key], from)) cache[key] = { from, index: t.indexOf(str, from) };
     return cache[key].index;
   };
-  return { close: (kind, from) => search(kind, CLOSE_G[kind], from), start: (from) => search('', START, from), index };
+  return { close: (kind, from) => search(kind, CLOSE_G[kind], from), anyClose: (from) => search('*', ANY_CLOSE_G, from), start: (from) => search('', START, from), index };
 }
 function plainEnd(find, t, from, kind) {
-  const c = find.close(kind, from),
+  const c = find.anyClose(from),
     s = find.start(from);
-  if (c && (!s || c.index < s.index)) return { end: c.index, next: c.index + c.len, how: 'closed' };
+  if (c && (!s || c.index < s.index)) return closedAt(kind, c.index, c.m);
   if (s) return { end: s.index, next: s.index, how: 'implicit' };
   return { end: t.length, next: t.length, how: 'eof' };
 }
+// A meta block whose JSON mentions a block tag inside a string ("summary":
+// "uses <forma-screen> blocks") ends early at that tag. When the text up to
+// its own </forma-meta> is one whole JSON object, the tag was inside a string
+// (JSON allows '<' nowhere else), so the block really ends there. Meta is
+// small; the size cap keeps repeated attempts on hostile input linear.
+function metaEnd(find, t, from, end, body) {
+  if (end.how === 'closed' || end.how === 'eof' || plain(findJSON(body)?.value)) return end;
+  const c = find.close('meta', from);
+  if (!c || c.index - from > 20000) return end;
+  const whole = parseLoose(unfence(t.slice(from, c.index)));
+  return whole && plain(whole.value) ? { end: c.index, next: c.index + c.len, how: 'closed' } : end;
+}
 const unfence = (s) =>
   s
-    .replace(/^\s*```[\w+-]*[ \t]*\n?/, '')
+    .replace(/^\s*```[ \t]*[\w+-]*[ \t]*\n?/, '')
     .replace(/\n?[ \t]*```\s*$/, '')
-    .replace(/^[ \t]*```[\w+-]*[ \t]*$/gm, '')
+    .replace(FENCE_LINE, '')
     .trim();
 
 // parseBlocks(text) -> { css, cssMode, screens: [{id, name, html, truncated?}],
@@ -791,12 +896,14 @@ function parseBlocks(text) {
   let pos = 0,
     from = 0,
     elementDone = false;
+  const problem = (p) => problems.length < 10 && problems.push(p);
   for (;;) {
     START.lastIndex = pos;
     const m = START.exec(t);
     if (!m) break;
     pos = m.index + m[0].length;
-    if (t[m.index - 1] === '`') continue; // `<forma-css>` mentioned as inline code
+    // `<forma-css>` mentioned as inline code; a fence glued to a block (```<forma-css>) is not.
+    if (t[m.index - 1] === '`' && !t.startsWith('```', m.index - 3)) continue;
     const tag = openTag(t, pos);
     if (!tag) continue;
     const kind = m[1].toLowerCase();
@@ -814,10 +921,14 @@ function parseBlocks(text) {
       from = pos;
       continue;
     }
-    const end = tag.self
+    let end = tag.self
       ? { end: tag.end, next: tag.end, how: 'closed' }
       : ((kind === 'screen' || kind === 'element') && htmlEnd(t, tag.end, kind, find)) || plainEnd(find, t, tag.end, kind);
-    const body = unfence(t.slice(tag.end, end.end));
+    let body = unfence(t.slice(tag.end, end.end));
+    if (kind === 'meta' && !tag.self) {
+      const fixed = metaEnd(find, t, tag.end, end, body);
+      if (fixed !== end) (end = fixed), (body = unfence(t.slice(tag.end, end.end)));
+    }
     // An unclosed tag without attributes or markup is prose that mentions the
     // protocol ("the <forma-css> and <forma-screen> blocks"): keep it as notes.
     if (end.how !== 'closed' && !Object.keys(a).length && !/[<{]/.test(body)) continue;
@@ -826,8 +937,9 @@ function parseBlocks(text) {
     const truncated = end.how === 'eof';
     if (truncated) {
       out.truncated = true;
-      problems.push(`The ${label} block was not closed; the answer looks truncated.`);
-    } else if (end.how === 'implicit') problems.push(`The ${label} block was not closed before the next block.`);
+      problem(`The ${label} block was not closed; the answer looks truncated.`);
+    } else if (end.how === 'implicit') problem(`The ${label} block was not closed before the next block.`);
+    else if (end.how === 'mismatch') problem(`The ${label} block was closed with </forma-${end.by}>.`);
     if (kind === 'css') {
       if ((a.mode || '').toLowerCase() === 'replace') (out.css = body), (out.cssMode = 'replace');
       else out.css = out.css == null ? body : out.css && body ? `${out.css}\n${body}` : out.css || body;
@@ -841,23 +953,22 @@ function parseBlocks(text) {
     } else if (kind === 'element') {
       if (!truncated || !elementDone) (out.element = body), (elementDone = elementDone || !truncated);
     } else {
-      let value = null;
-      try {
-        value = extractJSON(body);
-      } catch {}
-      if (plain(value)) out.meta = { ...(out.meta || {}), ...value };
-      else problems.push('The <forma-meta> block was not a JSON object and was ignored.');
+      const value = findJSON(body)?.value;
+      if (plain(value)) {
+        out.meta ||= {};
+        for (const [k, v] of Object.entries(value)) if (!META_UNSAFE.has(k)) out.meta[k] = v;
+      } else problem('The <forma-meta> block was not a JSON object and was ignored.');
     }
   }
   notes.push(t.slice(from));
   const prose = notes
     .join('\n')
     .replace(STRAY_CLOSE, '')
-    .replace(/^[ \t]*```[\w+-]*[ \t]*$/gm, '')
+    .replace(FENCE_LINE, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
     .slice(0, 3000);
-  out.notes = [prose, ...problems.slice(0, 10)].filter(Boolean).join('\n');
+  out.notes = [prose, ...problems].filter(Boolean).join('\n');
   return out;
 }
 
@@ -871,5 +982,5 @@ module.exports = {
   extendConfig,
   visionSupported,
   MESSAGES: MSG,
-  _internal: { sseParser, splitThinking, requestBody, dropTrailingCommas, VISION },
+  _internal: { sseParser, splitThinking, requestBody, dropTrailingCommas, findJSON, VISION, TUNING },
 };

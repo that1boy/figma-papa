@@ -142,7 +142,6 @@ const EXACT = {
   'duration-200': '.duration-200{transition-duration:200ms}',
   'delay-[250ms]': '.delay-\\[250ms\\]{transition-delay:250ms}',
   'ease-out': '.ease-out{transition-timing-function:cubic-bezier(0, 0, 0.2, 1)}',
-  'blur-sm': '.blur-sm{filter:blur(4px)}',
   'backdrop-blur': '.backdrop-blur{-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}',
   // interactivity
   'cursor-pointer': '.cursor-pointer{cursor:pointer}',
@@ -229,8 +228,8 @@ test('bare kit component names defer to the kit; variant and important forms sti
   let kit = [];
   try { kit = require('../lib/kit.cjs').KIT_CLASSES; } catch {}
   for (const c of kit) assert.equal(css(c), '', c);
-  assert.equal(css('md:sr-only'), media('(min-width: 768px)', '.md\\:sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0, 0, 0, 0);white-space:nowrap;border-width:0}'));
-  assert.equal(css('md:not-sr-only'), media('(min-width: 768px)', '.md\\:not-sr-only{position:static;width:auto;height:auto;padding:0;margin:0;overflow:visible;clip:auto;white-space:normal}'));
+  assert.equal(css('md:sr-only'), media('(min-width: 768px)', '.md\\:sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0, 0, 0, 0);clip-path:inset(50%);white-space:nowrap;border-width:0}'));
+  assert.equal(css('md:not-sr-only'), media('(min-width: 768px)', '.md\\:not-sr-only{position:static;width:auto;height:auto;padding:0;margin:0;overflow:visible;clip:auto;clip-path:none;white-space:normal}'));
   assert.equal(css('md:table'), media('(min-width: 768px)', '.md\\:table{display:table}'));
   assert.equal(css('table-row'), '.table-row{display:table-row}');
   // !container: Tailwind's centred container, emitted before all utilities so they can override it
@@ -266,28 +265,28 @@ test('space-x/y and divide-x/y use the Tailwind child selectors', () => {
   assert.equal(css('group-hover:space-y-1').split('{')[0], `.group:hover .group-hover\\:space-y-1${C}`);
   assert.equal(css('md:space-y-0'), media('(min-width: 768px)', `.md\\:space-y-0${C}{--tw-space-y-reverse:0;margin-top:calc(0px * calc(1 - var(--tw-space-y-reverse)));margin-bottom:calc(0px * var(--tw-space-y-reverse))}`));
   const d = css('divide-y', 'divide-border', 'divide-x-2', 'divide-dashed');
-  assert.ok(d.includes(`.divide-y${C}{--tw-divide-y-reverse:0;border-top-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)));border-bottom-width:calc(1px * var(--tw-divide-y-reverse));border-top-style:solid;border-bottom-style:solid}`));
-  assert.ok(d.includes(`.divide-x-2${C}{--tw-divide-x-reverse:0;border-right-width:calc(2px * var(--tw-divide-x-reverse));border-left-width:calc(2px * calc(1 - var(--tw-divide-x-reverse)));border-right-style:solid;border-left-style:solid}`));
+  assert.ok(d.includes(`.divide-y${C}{--tw-divide-y-reverse:0;border-top-width:calc(1px * calc(1 - var(--tw-divide-y-reverse)));border-bottom-width:calc(1px * var(--tw-divide-y-reverse));border-top-style:var(--tw-border-style, solid);border-bottom-style:var(--tw-border-style, solid)}`));
+  assert.ok(d.includes(`.divide-x-2${C}{--tw-divide-x-reverse:0;border-right-width:calc(2px * var(--tw-divide-x-reverse));border-left-width:calc(2px * calc(1 - var(--tw-divide-x-reverse)));border-right-style:var(--tw-border-style, solid);border-left-style:var(--tw-border-style, solid)}`));
   assert.ok(d.includes(`.divide-border${C}{border-color:var(--border)}`));
-  assert.ok(d.includes(`.divide-dashed${C}{border-style:dashed}`));
-  assert.ok(d.startsWith(`@layer forma-preflight{:where(.divide-border${C},.divide-dashed${C},.divide-x-2${C},.divide-y${C}){border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}`));
+  assert.ok(d.includes(`.divide-dashed${C}{--tw-border-style:dashed;border-style:dashed}`));
+  assert.ok(d.startsWith(`@layer forma-preflight{:where(.divide-border${C},.divide-dashed${C},.divide-x-2${C},.divide-y${C}){--tw-border-style:solid;border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}`));
 });
 
 test('border utilities carry a layered preflight reset scoped to the elements that use them', () => {
   const out = css('border', 'hover:border-accent', 'p-4');
-  assert.equal(out.split('\n')[0], '@layer forma-preflight{:where(.border,.hover\\:border-accent){border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}:where(hr){border-top-width:1px}}');
-  assert.ok(out.includes('.border{border-width:1px;border-style:solid}'));
+  assert.equal(out.split('\n')[0], '@layer forma-preflight{:where(.border,.hover\\:border-accent){--tw-border-style:solid;border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}:where(hr){border-top-width:1px}}');
+  assert.ok(out.includes('.border{border-width:1px;border-style:var(--tw-border-style, solid)}'));
   assert.ok(out.includes('.hover\\:border-accent:hover{border-color:var(--accent)}'));
-  assert.equal(css('border-x-2'), '@layer forma-preflight{:where(.border-x-2){border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}:where(hr){border-top-width:1px}}\n.border-x-2{border-left-width:2px;border-right-width:2px;border-left-style:solid;border-right-style:solid}');
-  assert.ok(css('border-t').endsWith('.border-t{border-top-width:1px;border-top-style:solid}'));
-  assert.ok(css('border-0').endsWith('.border-0{border-width:0px;border-style:solid}'));
+  assert.equal(css('border-x-2'), '@layer forma-preflight{:where(.border-x-2){--tw-border-style:solid;border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}:where(hr){border-top-width:1px}}\n.border-x-2{border-left-width:2px;border-right-width:2px;border-left-style:var(--tw-border-style, solid);border-right-style:var(--tw-border-style, solid)}');
+  assert.ok(css('border-t').endsWith('.border-t{border-top-width:1px;border-top-style:var(--tw-border-style, solid)}'));
+  assert.ok(css('border-0').endsWith('.border-0{border-width:0px;border-style:var(--tw-border-style, solid)}'));
   // a later border-style utility still wins over the solid set by width utilities
   const ds = css('border-dashed', 'border-2');
   assert.ok(ds.indexOf('.border-2{') < ds.indexOf('.border-dashed{'));
   assert.ok(css('border-t-accent/40').endsWith('.border-t-accent\\/40{border-top-color:color-mix(in oklab, var(--accent) 40%, transparent)}'));
-  assert.ok(css('border-[3px]').endsWith('.border-\\[3px\\]{border-width:3px;border-style:solid}'));
+  assert.ok(css('border-[3px]').endsWith('.border-\\[3px\\]{border-width:3px;border-style:var(--tw-border-style, solid)}'));
   assert.ok(css('border-[var(--line)]').endsWith('.border-\\[var\\(--line\\)\\]{border-color:var(--line)}'));
-  assert.ok(css('border-dashed').endsWith('.border-dashed{border-style:dashed}'));
+  assert.ok(css('border-dashed').endsWith('.border-dashed{--tw-border-style:dashed;border-style:dashed}'));
   assert.doesNotMatch(css('p-4', 'rounded-lg', 'shadow'), /:where|@layer/);
 });
 
@@ -414,7 +413,7 @@ test('fuzz: random and mutated class names keep the stylesheet well formed', () 
   assert.equal((out.match(/\{/g) || []).length, (out.match(/\}/g) || []).length);
   for (const line of out.split('\n')) {
     if (line === '}' || /^@media [^{}]+\{$/.test(line) || /^@keyframes [a-z]+\{/.test(line)) continue;
-    if (line.startsWith('@layer forma-preflight{')) { assert.match(line, /^@layer forma-preflight\{:where\([^{}<>"'`@]+\)\{border-width:0;border-style:solid;border-color:var\(--border, #e5e7eb\)\}:where\(hr\)\{border-top-width:1px\}\}$/); continue; }
+    if (line.startsWith('@layer forma-preflight{')) { assert.match(line, /^@layer forma-preflight\{:where\([^{}<>"'`@]+\)\{--tw-border-style:solid;border-width:0;border-style:solid;border-color:var\(--border, #e5e7eb\)\}:where\(hr\)\{border-top-width:1px\}\}$/); continue; }
     const i = line.indexOf('{'), body = line.slice(i + 1, -1);
     assert.ok(i > 0 && line.endsWith('}'), line);
     assert.doesNotMatch(body, /[{}<>"'`\\@]|url\(|\/\*|expression/i, line);
@@ -489,9 +488,80 @@ test('UTILITY_REFERENCE is a compact prompt naming the families and semantic col
     assert.ok(UTILITY_REFERENCE.includes(s), s);
   // every concrete example class in the reference is real
   const examples = UTILITY_REFERENCE.split(/\s+/).map((t) => t.replace(/^\(+/, '').replace(/[),.]+$/, ''))
-    .filter((t) => /^!?-?[a-z][a-z0-9]*-/.test(t) && /[\d[/]/.test(t) && !/[…*]|:$/.test(t) && t !== 'accent-2');
+    .filter((t) => /^!?-?[a-z][a-z0-9]*-/.test(t) && /[\d[/]/.test(t) && !/[…*]|:$/.test(t) && !SEMANTIC_COLORS.includes(t));
   assert.ok(examples.length >= 15, String(examples.length));
   assert.deepEqual(examples.filter((c) => !supported(c)), []);
+});
+
+test('review: every colour variable the kit defines is a usable token', () => {
+  let vars = [];
+  try { const k = require('../lib/kit.cjs'); vars = k.tokensCSS(k.normalizeTokens({})).match(/--[a-z0-9-]+(?=:)/g).map((v) => v.slice(2)); } catch {}
+  for (const t of ['surface-2', 'border-strong', 'info', 'success-soft', 'success-strong', 'warning-soft', 'warning-strong', 'danger-soft', 'danger-strong', 'info-soft', 'info-strong', 'on-danger', 'accent-hover', 'chart-1', 'chart-6']) {
+    assert.ok(SEMANTIC_COLORS.includes(t), t);
+    if (vars.length) assert.ok(vars.includes(t), `kit defines --${t}`);
+  }
+  assert.equal(css('bg-surface-2'), '.bg-surface-2{background-color:var(--surface-2)}');
+  assert.equal(css('text-danger-strong'), '.text-danger-strong{color:var(--danger-strong)}');
+  assert.equal(css('bg-info-soft/50'), '.bg-info-soft\\/50{background-color:color-mix(in oklab, var(--info-soft) 50%, transparent)}');
+  assert.equal(css('fill-chart-3'), '.fill-chart-3{fill:var(--chart-3)}');
+  assert.ok(css('border-border-strong').endsWith('.border-border-strong{border-color:var(--border-strong)}'));
+  assert.ok(css('border-t-info').endsWith('.border-t-info{border-top-color:var(--info)}'));
+  for (const bad of ['bg-surface-3', 'bg-chart-7', 'text-info-medium', 'border-strong', 'bg-glow']) assert.equal(supported(bad), false, bad);
+});
+
+test('review: not-sr-only undoes clip-path too, so kit sr-only skip links appear on focus', () => {
+  assert.ok(css('focus:not-sr-only').includes('clip:auto;clip-path:none;'));
+  assert.ok(css('md:sr-only').includes('clip:rect(0, 0, 0, 0);clip-path:inset(50%);'));
+});
+
+test('review: arbitrary values the browser would drop are unknown, not silently "supported"', () => {
+  // negative values only where CSS accepts them
+  for (const bad of ['p-[-4px]', 'px-[-1rem]', 'w-[-10px]', 'h-[-1px]', 'size-[-2px]', 'min-w-[-1px]', 'max-w-[-1px]', 'basis-[-1px]', 'gap-[-2px]', 'gap-x-[-1px]', 'text-[-12px]', 'text-sm/[-1]',
+    'leading-[-1]', 'rounded-[-4px]', 'rounded-t-[-1px]', 'border-[-1px]', 'border-t-[-2px]', 'divide-y-[-1px]', 'outline-[-1px]', 'decoration-[-1px]', 'stroke-[-1]', 'blur-[-2px]',
+    'backdrop-blur-[-1px]', 'grow-[-1]', 'shrink-[-1]', 'line-clamp-[0]', 'line-clamp-[-2]', 'columns-[0]', 'columns-[-1rem]', 'col-start-[0]', 'row-end-[0]',
+    // percentages only where CSS accepts them
+    'border-[50%]', 'border-t-[10%]', 'divide-x-[10%]', 'outline-[10%]', 'outline-offset-[10%]', 'ring-[50%]', 'ring-offset-[10%]', 'tracking-[10%]', 'blur-[10%]', 'backdrop-blur-[5%]',
+    'columns-[50%]', 'border-[percentage:50%]'])
+    assert.equal(supported(bad), false, bad);
+  for (const ok of ['rounded-[50%]', 'text-[120%]', 'w-[50%]', 'leading-[150%]', 'indent-[5%]', 'translate-x-[50%]', 'decoration-[10%]', 'underline-offset-[10%]', 'border-[length:3px]', 'ring-[3px]', 'tracking-[0.1em]'])
+    assert.ok(supported(ok), ok);
+  for (const ok of ['m-[-4px]', '-m-[4px]', 'top-[-10px]', 'inset-x-[-1rem]', 'tracking-[-0.02em]', 'indent-[-1em]', 'z-[-1]', 'order-[-1]', 'col-start-[-1]', 'row-end-[-2]', 'translate-x-[-10px]',
+    'outline-offset-[-2px]', 'underline-offset-[-1px]', 'scale-[-1]', 'rotate-[-45deg]', 'space-x-[-4px]', 'line-clamp-[8]', 'columns-[3]', 'columns-[16rem]', 'w-[var(--w)]', 'line-clamp-[var(--n)]'])
+    assert.ok(supported(ok), ok);
+});
+
+// auto-fit/auto-fill need fixed-size tracks, appear once, and only beside fixed-size tracks; no negative sizes.
+// The browser test checks that Chromium agrees with both lists.
+const GRID_BAD = ['repeat(auto-fit,1fr)', 'repeat(auto-fill,auto)', 'repeat(auto-fill,minmax(auto,1fr))', 'repeat(auto-fit,min-content)', 'repeat(auto-fit,fit-content(10rem))',
+  'repeat(auto-fit,minmax(10rem,1fr))_auto', 'repeat(auto-fit,10rem)_repeat(auto-fill,10rem)', 'repeat(2,1fr)_repeat(auto-fit,10rem)', 'repeat(auto-fit,minmax(10rem,1fr))_1fr', '-1rem_1fr',
+  'minmax(-1px,1fr)', 'repeat(3,-2rem)', 'min(1fr,2rem)', 'minmax(1fr,2fr)', 'repeat(auto-fit,minmax(1rem,1fr))_fit-content(4rem)'];
+const GRID_OK = ['repeat(auto-fit,minmax(10rem,1fr))_10rem', 'repeat(auto-fit,minmax(min-content,10rem))', 'repeat(auto-fill,minmax(0,1fr))', 'repeat(auto-fit,minmax(10rem,max-content))',
+  'repeat(auto-fit,minmax(min(100%,14rem),1fr))', 'repeat(3,auto)', '16rem_repeat(auto-fill,minmax(8rem,12rem))', 'auto_1fr_auto', 'fit-content(20ch)_minmax(0,1fr)', 'repeat(2,minmax(0,1fr)_2rem)',
+  'clamp(10rem,30%,20rem)_1fr', 'max(10rem,20%)_repeat(auto-fit,minmax(6rem,1fr))', 'minmax(auto,1fr)_min-content'];
+test('review: grid templates follow the CSS Grid validity rules', () => {
+  for (const bad of GRID_BAD) assert.equal(supported(`grid-cols-[${bad}]`), false, bad);
+  for (const ok of [...GRID_OK, 'repeat(auto-fit,minmax(var(--min),1fr))', 'repeat(auto-fit,var(--track))']) assert.ok(supported(`grid-cols-[${ok}]`), ok);
+  // grid-auto-columns/rows take track sizes, never repeat()
+  assert.equal(css('auto-rows-[minmax(4rem,auto)]'), '.auto-rows-\\[minmax\\(4rem\\,auto\\)\\]{grid-auto-rows:minmax(4rem, auto)}');
+  assert.equal(css('auto-cols-[200px]'), '.auto-cols-\\[200px\\]{grid-auto-columns:200px}');
+  assert.equal(css('auto-cols-[minmax(0,1fr)_auto]'), '.auto-cols-\\[minmax\\(0\\,1fr\\)_auto\\]{grid-auto-columns:minmax(0, 1fr) auto}');
+  for (const bad of ['auto-cols-[repeat(2,1fr)]', 'auto-rows-3', 'auto-rows-none', 'auto-cols-[url(x)]']) assert.equal(supported(bad), false, bad);
+});
+
+test('review: border style survives responsive and state width classes; filters compose', () => {
+  const out = css('border-dotted', 'md:border', 'hover:border-2');
+  assert.ok(out.includes('.border-dotted{--tw-border-style:dotted;border-style:dotted}'));
+  assert.ok(out.includes('.md\\:border{border-width:1px;border-style:var(--tw-border-style, solid)}'));
+  assert.ok(out.includes('.hover\\:border-2:hover{border-width:2px;border-style:var(--tw-border-style, solid)}'));
+  // the reset re-initialises --tw-border-style on every bordered element, so it never inherits
+  assert.match(out, /^@layer forma-preflight\{:where\([^)]*\)\{--tw-border-style:solid;/);
+  const f = css('blur-sm', 'grayscale', 'hover:grayscale-0');
+  assert.ok(f.startsWith('*,::before,::after{--tw-blur: ;--tw-grayscale: ;}'));
+  assert.ok(f.includes('.blur-sm{--tw-blur:blur(4px);filter:var(--tw-blur) var(--tw-grayscale)}'));
+  assert.ok(f.includes('.grayscale{--tw-grayscale:grayscale(100%);filter:var(--tw-blur) var(--tw-grayscale)}'));
+  assert.ok(f.includes('.hover\\:grayscale-0:hover{--tw-grayscale:grayscale(0);filter:var(--tw-blur) var(--tw-grayscale)}'));
+  assert.equal(escapeClass(null), '');
+  assert.equal(escapeClass(42), '\\34 2');
 });
 
 test('performance: 5000 distinct classes in under 200 ms', () => {
@@ -540,11 +610,13 @@ test('generated CSS applies in a real Chromium', { skip: !browserReady && 'Chrom
       <div id="auto" class="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] w-[400px]"><i>1</i><i>2</i><i>3</i></div><div id="vid" class="aspect-video w-[160px]"></div>
       <div id="frac" class="flex"><div id="third" class="basis-1/3 shrink-0">x</div></div><div id="grad" class="bg-gradient-to-r from-accent to-accent-2 h-4"></div>
       <div id="inj" class="x}body{background:red} p-[1px;}body{color:red]">i</div><div id="kit" class="list-item container">k</div>
-      <div id="kcard" class="card border-accent">c</div><button id="kbtn" class="border border-border">b</button><div id="bt" class="border-t">t</div><div id="dash" class="border-dashed">d</div><hr id="hr" class="border-accent">`;
+      <div id="kcard" class="card border-accent">c</div><button id="kbtn" class="border border-border">b</button><div id="bt" class="border-t">t</div><div id="dash" class="border-dashed">d</div><hr id="hr" class="border-accent">
+      <a id="skip" href="#main" class="sr-only focus:not-sr-only focus:p-2">Skip to content</a><div id="dot" class="border-dotted md:border">d</div>
+      <div id="outer" class="border-dashed border"><span id="inner" class="border">i</span></div><div id="filt" class="blur-sm grayscale">f</div><div id="s2" class="bg-surface-2 text-danger-strong">s</div>`;
     const classes = collectClasses(body);
     const sheet = utilityCSS(classes);
     const page = await (await browser.newContext({ viewport: { width: 1024, height: 800 } })).newPage();
-    await page.setContent(`<!doctype html><html><head><style>:root{--accent:#4f46e5;--accent-2:#0891b2;--surface:#ffffff;--border:#e4e4e7;--muted:#5f5f69;--background:#fafafa;--text:#18181b;--radius:8px;--radius-lg:12px;--radius-sm:4px}body,p{margin:0}:where(.list-item){display:flex}:where(.container){max-width:300px;margin-inline:auto}:where(.sr-only){position:absolute;width:1px}:where(.card){border:1px solid #e4e4e7}:where(button){border:0}</style><style>${sheet}</style></head><body>${body}</body></html>`);
+    await page.setContent(`<!doctype html><html><head><style>:root{--accent:#4f46e5;--accent-2:#0891b2;--surface:#ffffff;--border:#e4e4e7;--muted:#5f5f69;--background:#fafafa;--text:#18181b;--radius:8px;--radius-lg:12px;--radius-sm:4px;--surface-2:#f4f4f5;--danger-strong:#b91c1c}body,p{margin:0}:where(.list-item){display:flex}:where(.container){max-width:300px;margin-inline:auto}:where(.sr-only){position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}:where(.card){border:1px solid #e4e4e7}:where(button){border:0}</style><style>${sheet}</style></head><body>${body}</body></html>`);
     const cs = (sel, prop, pseudo) => page.evaluate(([s, p, ps]) => getComputedStyle(document.querySelector(s), ps || null)[p], [sel, prop, pseudo]);
     assert.equal((await cs('#grid', 'gridTemplateColumns')).split(' ').length, 3, 'md:grid-cols-3 at 1024px');
     assert.equal(await cs('#half', 'width'), '200px');
@@ -598,11 +670,29 @@ test('generated CSS applies in a real Chromium', { skip: !browserReady && 'Chrom
     assert.equal(await cs('#dash', 'borderTopWidth'), '0px', 'border-dashed alone draws nothing, as in Tailwind');
     assert.equal(await cs('#hr', 'borderTopWidth'), '1px');
     assert.equal(await cs('#hr', 'borderTopColor'), 'rgb(79, 70, 229)');
+    // review regressions: skip link, border style kept by responsive widths, no inheritance, filters compose, kit tokens
+    assert.equal(await cs('#skip', 'clipPath'), 'inset(50%)');
+    await page.focus('#skip');
+    assert.equal(await cs('#skip', 'clipPath'), 'none', 'focus:not-sr-only undoes the kit clip-path');
+    assert.ok(await page.evaluate(() => document.querySelector('#skip').getBoundingClientRect().width > 50), 'skip link is visible when focused');
+    assert.equal(await cs('#dot', 'borderTopStyle'), 'dotted', 'border-dotted md:border stays dotted');
+    assert.equal(await cs('#dot', 'borderTopWidth'), '1px');
+    assert.equal(await cs('#outer', 'borderTopStyle'), 'dashed');
+    assert.equal(await cs('#inner', 'borderTopStyle'), 'solid', 'border style does not inherit from a dashed parent');
+    assert.equal(await cs('#filt', 'filter'), 'blur(4px) grayscale(1)');
+    assert.equal(await cs('#s2', 'backgroundColor'), 'rgb(244, 244, 245)');
+    assert.equal(await cs('#s2', 'color'), 'rgb(185, 28, 28)');
+    // the grid-template rules agree with Chromium's parser in both directions
+    const tpl = (t) => t.replace(/,/g, ', ').replace(/_/g, ' ');
+    assert.deepEqual(await page.evaluate((l) => l.filter((v) => !CSS.supports('grid-template-columns', v)), GRID_OK.map(tpl)), []);
+    assert.deepEqual(await page.evaluate((l) => l.filter((v) => CSS.supports('grid-template-columns', v)), GRID_BAD.map(tpl)), []);
+    for (const t of GRID_OK) assert.ok(css(`grid-cols-[${t}]`).includes(`{grid-template-columns:${tpl(t).replace(/, _?/g, ', ')}}`), t);
     assert.equal(await cs('body', 'backgroundColor'), 'rgba(0, 0, 0, 0)', 'injection did not style body');
     assert.equal(await cs('body', 'color'), 'rgb(0, 0, 0)');
     // narrow viewport: mobile-first base applies, md: does not
     await page.setViewportSize({ width: 600, height: 800 });
     assert.equal((await cs('#grid', 'gridTemplateColumns')).split(' ').length, 1, 'single implicit column below md');
+    assert.equal(await cs('#dot', 'borderTopWidth'), '0px', 'below md the dotted border has no width');
     await page.setViewportSize({ width: 1600, height: 800 });
     assert.equal(await cs('#big', 'paddingTop'), '16px', '2xl: applies at 1600px');
     // escapeClass matches the browser's CSS.escape
@@ -625,5 +715,29 @@ test('generated CSS applies in a real Chromium', { skip: !browserReady && 'Chrom
     const invalid = await page.evaluate((list) => list.filter(([p, v]) => !CSS.supports(p, v)), decls);
     assert.deepEqual(invalid, []);
     assert.ok(wide.length > 300, `checked ${wide.length} classes`);
+    // sweep: every literal declaration produced for prefix x arbitrary-value combinations is valid CSS
+    const prefixes = 'p mx inset top z order col-span col-start line-clamp aspect size w min-h max-w shrink grow basis translate-x rotate scale columns auto-rows gap space-x divide-x divide rounded rounded-tl border border-t bg from fill stroke indent font text leading tracking decoration underline-offset placeholder caret accent opacity shadow outline outline-offset ring ring-offset blur backdrop-blur duration delay'.split(' ');
+    const vals = ['0', '-1', '1.5', '.5', '1000', '999999', '0px', '10px', '-10px', '50%', '-50%', '1rem', '-1rem', '1ch', '1dvh', '1cqw', '45deg', '1turn', '0.3s', '300ms', '#fff', '#ffff', '#ffffff80', '4/3', 'length:10px', 'length:-1px', 'color:#fff', 'number:2', 'percentage:50%'];
+    const sweep = classifyClasses(prefixes.flatMap((p) => vals.flatMap((v) => [`${p}-[${v}]`, `-${p}-[${v}]`]))).supported;
+    const literal = [...new Set(utilityCSS(sweep).split('\n').filter((l) => l.includes('{') && l.endsWith('}') && !/^[@*]/.test(l)).flatMap((l) => l.slice(l.indexOf('{') + 1, -1).split(';')))]
+      .map((d) => { const i = d.indexOf(':'); return [d.slice(0, i), d.slice(i + 1)]; }).filter(([p, v]) => !p.startsWith('--') && p !== '-webkit-backdrop-filter' && !v.includes('var('));
+    assert.ok(sweep.length > 400 && literal.length > 250, `${sweep.length} classes, ${literal.length} declarations`);
+    assert.deepEqual(await page.evaluate((list) => list.filter(([p, v]) => !CSS.supports(p, v)), literal), []);
+    // with the real kit stylesheet (when the kit module is present): kit tokens resolve and skip links work
+    let kit = null;
+    try { kit = require('../lib/kit.cjs'); } catch {}
+    if (kit?.kitCSS) {
+      const kbody = `<a id="skip" href="#m" class="sr-only focus:not-sr-only focus:absolute focus:p-3">Skip to content</a><main id="m"><div id="c" class="card p-0 bg-surface-2"><p id="t" class="text-danger-strong border-t border-border-strong">x</p></div></main>`;
+      const kpage = await (await browser.newContext({ viewport: { width: 1024, height: 800 } })).newPage();
+      await kpage.setContent(`<!doctype html><html><head><style>${kit.kitCSS(kit.normalizeTokens({}))}\n${utilityCSS(collectClasses(kbody))}</style></head><body>${kbody}</body></html>`);
+      const kcs = (sel, prop) => kpage.evaluate(([s, p]) => getComputedStyle(document.querySelector(s))[p], [sel, prop]);
+      await kpage.focus('#skip');
+      assert.ok(await kpage.evaluate(() => { const r = document.querySelector('#skip').getBoundingClientRect(); return r.width > 50 && r.height > 10 && getComputedStyle(document.querySelector('#skip')).clipPath === 'none'; }), 'kit skip link appears on focus');
+      assert.equal(await kcs('#c', 'paddingTop'), '0px');
+      assert.notEqual(await kcs('#c', 'backgroundColor'), 'rgba(0, 0, 0, 0)', 'bg-surface-2 resolves');
+      assert.notEqual(await kcs('#t', 'color'), 'rgb(0, 0, 0)', 'text-danger-strong resolves');
+      assert.equal(await kcs('#t', 'borderTopWidth'), '1px');
+      assert.notEqual(await kcs('#t', 'borderTopColor'), await kcs('#t', 'color'), 'border-border-strong resolves');
+    }
   } finally { await browser.close(); }
 });

@@ -153,9 +153,10 @@ function svgAttributes(tag, attribs) {
 // sanitized text and attributes cannot contain a literal "<", so only these
 // generated tags match.
 const DROP = 'forma-drop', DROP_TEXT = 'forma-drop-text';
+// Sanitized attribute values never contain a literal ">", so [^>]* stays inside the tag.
 function finish(html) {
   if (!html.includes('forma-drop')) return html;
-  const re = /<(\/?)forma-drop(-text)?>/g;
+  const re = /<(\/?)forma-drop(-text)?(?:\s[^>]*)?>/g;
   let out = '', depth = 0, at = 0, m;
   while ((m = re.exec(html))) {
     if (!depth) out += html.slice(at, m.index);
@@ -164,35 +165,73 @@ function finish(html) {
     at = re.lastIndex;
   }
   // Balanced markers are the normal case; otherwise keep the text and drop only the markers.
-  return depth === 0 ? out + html.slice(at) : html.replace(/<\/?forma-drop(?:-text)?>/g, '');
+  return depth === 0 ? out + html.slice(at) : html.replace(/<\/?forma-drop(?:-text)?(?:\s[^>]*)?>/g, '');
 }
 // One policy per sanitize call: it tracks the open-element stack through
 // sanitize-html's onOpenTag/onCloseTag hooks so SVG elements are only kept
-// inside <svg>, and <title>/<desc> keep only text.
+// inside <svg>, and SVG <title>/<desc> keep only text (at any depth below them).
+// Each frame derives its flags from its parent, so deep nesting stays linear.
 function svgPolicy() {
-  const stack = [];
-  const context = () => {
-    const up = stack.slice(0, -1); // onOpenTag runs before transforms, so the current tag is last
-    return { inSvg: up.includes('svg'), parent: up[up.length - 1], svgText: up.length > 1 && ['title', 'desc'].includes(up[up.length - 1]) && up.includes('svg') };
-  };
+  const stack = []; // { name, svg: has an <svg> ancestor, text: has an SVG <title>/<desc> ancestor }
+  // onOpenTag runs before the transforms, so the element being transformed is on top.
+  const current = () => stack[stack.length - 1] || { svg: false, text: false };
   const svgTag = (name, attribs) => {
-    const c = context();
-    if (name !== 'svg' && !c.inSvg) return { tagName: name === 'title' || name === 'desc' ? DROP_TEXT : DROP, attribs: {} };
+    if (name !== 'svg' && !current().svg) return { tagName: name === 'title' || name === 'desc' ? DROP_TEXT : DROP, attribs: {} };
     return { tagName: name, attribs: svgAttributes(name, attribs) };
   };
+  // Model-written marker tags lose their attributes and become plain DROP markers.
+  const authoredMarker = () => ({ tagName: DROP, attribs: {} });
   return {
     DROP,
     DROP_TEXT,
     finish,
-    onOpenTag: (name) => void stack.push(name),
-    onCloseTag: (name) => {
-      const i = stack.lastIndexOf(name);
-      if (i >= 0) stack.length = i;
+    onOpenTag: (name) => {
+      const p = stack[stack.length - 1];
+      stack.push(p ? { name, svg: p.svg || p.name === 'svg', text: p.text || (p.svg && (p.name === 'title' || p.name === 'desc')) } : { name, svg: false, text: false });
     },
-    transformTags: Object.fromEntries(SVG_TAGS.map((t) => [t, svgTag])),
+    onCloseTag: (name) => {
+      // htmlparser2 closes the innermost element first, so this is O(1) in practice.
+      for (let i = stack.length - 1; i >= 0; i--)
+        if (stack[i].name === name) {
+          stack.length = i;
+          return;
+        }
+    },
+    transformTags: { ...Object.fromEntries(SVG_TAGS.map((t) => [t, svgTag])), [DROP]: authoredMarker, [DROP_TEXT]: authoredMarker },
     // Runs after the per-tag transforms for every element.
-    transformAll: (name, attribs) => (context().svgText ? { tagName: DROP, attribs: {} } : { tagName: name, attribs }),
+    transformAll: (name, attribs) => (current().text ? { tagName: DROP, attribs: {} } : { tagName: name, attribs }),
   };
+}
+// HTML ignores "/>" on non-void elements, so <i data-icon="x"/> would swallow the
+// rest of its parent. Close icon and chart hosts written that way explicitly.
+// The same htmlparser2 tokenizer the sanitizer uses decides what is self-closing,
+// so quoted attribute values containing "/>" or ">" are handled exactly.
+class SelfClosingScanner extends Parser {
+  onselfclosingtag(endIndex) {
+    // Inside <svg>/<math> htmlparser2 already closes the element itself.
+    this.voidedSelfClosing = !this.isInForeignContext?.();
+    try {
+      super.onselfclosingtag(endIndex);
+    } finally {
+      this.voidedSelfClosing = false;
+    }
+  }
+}
+function closeSelfClosingHosts(html) {
+  if (!html.includes('/>')) return html;
+  const edits = [];
+  const parser = new SelfClosingScanner(
+    {
+      onopentag(name, attribs) {
+        if (parser.voidedSelfClosing && (name === 'i' || name === 'figure' || (name === 'div' && Object.hasOwn(attribs, 'data-chart'))))
+          edits.push({ start: parser.endIndex + 1, end: parser.endIndex + 1, text: `</${name}>` });
+      },
+    },
+    { decodeEntities: true },
+  );
+  parser.write(html);
+  parser.end();
+  return edits.length ? splice(html, edits) : html;
 }
 // data-chart survives sanitization only as a JSON object of bounded size.
 function chartAttribute(v) {
@@ -212,21 +251,26 @@ const iconAttribute = (v) => {
 
 // Locate elements in (sanitized) HTML with htmlparser2 so callers can splice
 // replacements into the original string without re-serializing anything else.
-// Returns [{ name, attribs (decoded), start, openEnd, end, textOnly, text }].
+// Returns [{ name, attribs (decoded), start, openEnd, end, textOnly, text }];
+// `text` is the element's text content when textOnly (no child elements).
+// Linear in the input: only the innermost open element can still be text-only.
 function findElements(html, test) {
   const found = [], open = [];
+  let live = null; // innermost open matched element with no child element yet
   const parser = new Parser(
     {
       onopentag(name, attribs) {
-        for (const o of open) if (o) o.textOnly = false;
+        if (live) live.textOnly = false;
         const rec = test(name, attribs) ? { name, attribs, start: parser.startIndex, openEnd: parser.endIndex + 1, textOnly: true, text: '' } : null;
+        live = rec;
         open.push(rec);
       },
       ontext(t) {
-        for (const o of open) if (o) o.text += t;
+        if (live) live.text += t;
       },
       onclosetag(name, implied) {
         const rec = open.pop();
+        live = null; // the parent now has a child element
         if (!rec) return;
         rec.end = !implied ? parser.endIndex + 1 : Math.max(rec.openEnd, Math.min(parser.startIndex, html.length));
         found.push(rec);
@@ -265,4 +309,5 @@ module.exports = {
   attrs,
   findElements,
   splice,
+  closeSelfClosingHosts,
 };

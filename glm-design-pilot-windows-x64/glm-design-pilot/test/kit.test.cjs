@@ -266,7 +266,8 @@ test('the kit covers every component in the spec plus accessibility affordances'
   assert.ok(KIT_FILE.includes(':where(dialog)'));
   assert.match(KIT_FILE, /:focus-visible/);
   assert.match(KIT_FILE, /@media \(prefers-reduced-motion:reduce\)/);
-  assert.match(KIT_FILE, /@media \(pointer:coarse\)\{[^@]*min-block-size:44px/);
+  // 44px targets on touch screens and at phone widths (page lint measures mobile with a fine pointer).
+  assert.match(KIT_FILE, /@media \(pointer:coarse\),\(max-width:640px\)\{[^@]*min-block-size:44px/);
   assert.match(KIT_FILE, /@media \(max-width:640px\)\{[^@]*td\[data-label\]\)::before\{content:attr\(data-label\)/);
   assert.match(KIT_FILE, /tabular-nums/);
   assert.match(KIT_FILE, /\[hidden\]/);

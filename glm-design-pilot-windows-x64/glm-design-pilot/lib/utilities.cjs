@@ -78,7 +78,12 @@ const PALETTE = Object.freeze(Object.fromEntries(Object.entries({
   pink: 'fdf2f8 fce7f3 fbcfe8 f9a8d4 f472b6 ec4899 db2777 be185d 9d174d 831843 500724',
   rose: 'fff1f2 ffe4e6 fecdd3 fda4af fb7185 f43f5e e11d48 be123c 9f1239 881337 4c0519',
 }).map(([k, v]) => [k, Object.freeze(Object.fromEntries(v.split(' ').map((h, i) => [SHADES[i], '#' + h])))])));
-const SEMANTIC_COLORS = Object.freeze(['accent', 'accent-2', 'accent-soft', 'accent-strong', 'background', 'surface', 'text', 'muted', 'border', 'success', 'warning', 'danger', 'on-accent']);
+// The spec's semantic tokens plus every other colour variable the kit defines and advertises in
+// KIT_REFERENCE (surface-2, border-strong, info, the -soft/-strong tints, chart-1…6), so `bg-surface-2` or
+// `text-danger-strong` resolve instead of silently producing nothing.
+const SEMANTIC_COLORS = Object.freeze(['accent', 'accent-2', 'accent-soft', 'accent-strong', 'background', 'surface', 'text', 'muted', 'border', 'success', 'warning', 'danger', 'on-accent',
+  'accent-hover', 'surface-2', 'border-strong', 'info', 'on-danger', 'danger-hover', 'success-soft', 'success-strong', 'warning-soft', 'warning-strong', 'danger-soft', 'danger-strong',
+  'info-soft', 'info-strong', 'chart-1', 'chart-2', 'chart-3', 'chart-4', 'chart-5', 'chart-6']);
 const SEMANTIC = new Set(SEMANTIC_COLORS);
 const SPECIAL = { white: '#fff', black: '#000', transparent: 'transparent', current: 'currentColor', inherit: 'inherit' };
 
@@ -86,6 +91,9 @@ const SPECIAL = { white: '#fff', black: '#000', transparent: 'transparent', curr
 const NUM = '(?:\\d{1,6}(?:\\.\\d{1,6})?|\\.\\d{1,6})';
 const RE = {
   length: new RegExp(`^-?${NUM}(?:px|rem|em|%|vh|vw|vmin|vmax|svh|lvh|dvh|svw|lvw|dvw|ch|ex|lh|cqw|cqh|cqi|pt)$|^-?0$`),
+  // `dim`: a length without percentages, for properties that reject them (border, outline and ring widths,
+  // letter-spacing, outline-offset, columns, blur()).
+  dim: new RegExp(`^-?${NUM}(?:px|rem|em|vh|vw|vmin|vmax|svh|lvh|dvh|svw|lvw|dvw|ch|ex|lh|cqw|cqh|cqi|pt)$|^-?0$`),
   number: new RegExp(`^-?${NUM}$`),
   color: /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/,
   angle: new RegExp(`^-?${NUM}(?:deg|rad|grad|turn)$|^0$`),
@@ -102,12 +110,18 @@ function arbitrary(v, kinds) {
   const m = /^(length|percentage|color|number):/.exec(s);
   if (m) { hint = m[1] === 'percentage' ? 'length' : m[1]; s = s.slice(m[0].length); }
   if (!s || BAD.test(s)) return null;
-  for (const k of kinds) if ((!hint || hint === k || (hint === 'number' && k === 'integer')) && (RE[k].test(s) || VAR.test(s))) return { k, v: s };
+  for (const k of kinds) if ((!hint || hint === k || (hint === 'number' && k === 'integer') || (hint === 'length' && k === 'dim')) && (RE[k].test(s) || VAR.test(s))) return { k, v: s };
   return null;
 }
 const arb = (v, ...kinds) => arbitrary(v, kinds)?.v ?? null;
 const pick = (map, v, ...kinds) => own(map, v) ? map[v] : kinds.length ? arb(v, ...kinds) : null;
 const sp = (v, extra) => extra && own(extra, v) ? extra[v] : own(SPACING, v) ? SPACING[v] : arb(v, 'length');
+// For properties that reject negative values (padding, gap, sizes, widths, radius, font-size, ...): an
+// arbitrary negative such as p-[-4px] would be dropped by the browser, so it is reported as unknown instead.
+const nn = (x) => (x != null && x[0] === '-' ? null : x);
+// Positive integers (line-clamp, columns) and non-zero grid lines; var() passes through.
+const posInt = (x) => (x != null && (VAR.test(x) || +x >= 1) ? x : null);
+const lineNo = (x) => (x != null && (VAR.test(x) || !/^-?0+$/.test(x)) ? x : null);
 function negate(x) {
   if (x == null) return null;
   if (VAR.test(x)) return `calc(${x} * -1)`;
@@ -147,10 +161,13 @@ function color(v) {
   const p = c === 'inherit' ? null : opacityPct(m);
   return p && `color-mix(in oklab, ${c} ${p}, transparent)`;
 }
-// grid-cols-[...] / grid-rows-[...]: a strict track-list grammar (no free-form CSS).
-// template := item ('_' item)*; item := repeat(auto-fit|auto-fill|1..100, track ('_' track)*) | track;
-// track := minmax(breadth, breadth) | fit-content(len) | breadth; breadth := len | fr | auto | min-content
-// | max-content | var(--x) | min(...)/max(...)/clamp(...) of lengths.
+// grid-cols-[...] / grid-rows-[...]: a strict track-list grammar (no free-form CSS) that also enforces the
+// CSS Grid validity rules, so a template the browser would drop is reported as unknown instead of silently
+// doing nothing. template := item ('_' item)*; item := repeat(auto-fit|auto-fill|1..100, track ('_' track)*)
+// | track; track := minmax(breadth, breadth) | fit-content(len) | breadth; breadth := len | fr | auto
+// | min-content | max-content; len := non-negative length/percentage | var(--x) | min()/max()/clamp() of lens.
+// auto-fit/auto-fill repeat only fixed-size tracks (a length, or minmax() with a length on either side), may
+// appear once, and then every other track must be fixed-size too; minmax() cannot start with fr.
 const FR = new RegExp(`^${NUM}fr$`), BREADTH = new Set(['auto', 'min-content', 'max-content']);
 function gridTemplate(s) {
   const t = s.match(/[a-z-]+\(|[(),_]|[^(),_]+/g);
@@ -158,39 +175,52 @@ function gridTemplate(s) {
   let i = 0;
   const eat = (x) => (t[i] === x ? (i++, true) : false);
   const comma = () => eat(',') && (eat('_'), true);
+  // Each piece returns { v: css, k: 'fixed' | 'inflexible' | 'flex' } or null.
   const len = () => {
     const x = t[i];
-    if (x === 'var(' && /^--[A-Za-z_][\w-]{0,62}$/.test(t[i + 1] || '') && t[i + 2] === ')') { i += 3; return `var(${t[i - 2]})`; }
-    if (x && RE.length.test(x)) { i++; return x; }
+    if (x === 'var(' && /^--[A-Za-z_][\w-]{0,62}$/.test(t[i + 1] || '') && t[i + 2] === ')') { i += 3; return { v: `var(${t[i - 2]})`, k: 'fixed' }; }
+    if (x && x[0] !== '-' && RE.length.test(x)) { i++; return { v: x, k: 'fixed' }; }
     return null;
   };
   const breadth = () => {
     for (const f of ['min(', 'max(', 'clamp(']) if (eat(f)) {
       const a = [len()];
-      while (comma()) a.push(len());
+      while (a[a.length - 1] && comma()) a.push(len());
       if (a.includes(null) || a.length < 2 || a.length > 3 || (f === 'clamp(') !== (a.length === 3) || !eat(')')) return null;
-      return `${f}${a.join(', ')})`;
+      return { v: `${f}${a.map((x) => x.v).join(', ')})`, k: 'fixed' };
     }
     const x = t[i];
-    if (x && (BREADTH.has(x) || FR.test(x))) { i++; return x; }
+    if (x && BREADTH.has(x)) { i++; return { v: x, k: 'inflexible' }; }
+    if (x && FR.test(x)) { i++; return { v: x, k: 'flex' }; }
     return len();
   };
   const track = () => {
-    if (eat('minmax(')) { const a = breadth(); if (!a || FR.test(a) || !comma()) return null; const b = breadth(); return b && eat(')') ? `minmax(${a}, ${b})` : null; }
-    if (eat('fit-content(')) { const a = len(); return a && eat(')') ? `fit-content(${a})` : null; }
-    return breadth();
+    if (eat('minmax(')) {
+      const a = breadth();
+      if (!a || a.k === 'flex' || !comma()) return null;
+      const b = breadth();
+      return b && eat(')') ? { v: `minmax(${a.v}, ${b.v})`, fixed: a.k === 'fixed' || b.k === 'fixed' } : null;
+    }
+    if (eat('fit-content(')) { const a = len(); return a && eat(')') ? { v: `fit-content(${a.v})`, fixed: false } : null; }
+    const b = breadth();
+    return b && { v: b.v, fixed: b.k === 'fixed' };
   };
   const item = () => {
     if (!eat('repeat(')) return track();
-    const n = t[i++];
-    if (!(n === 'auto-fit' || n === 'auto-fill' || (/^\d{1,3}$/.test(n || '') && +n >= 1 && +n <= 100)) || !comma()) return null;
+    const n = t[i++], auto = n === 'auto-fit' || n === 'auto-fill';
+    if (!(auto || (/^\d{1,3}$/.test(n || '') && +n >= 1 && +n <= 100)) || !comma()) return null;
     const a = [track()];
     while (a[a.length - 1] && eat('_')) a.push(track());
-    return a.includes(null) || !eat(')') ? null : `repeat(${n}, ${a.join(' ')})`;
+    if (a.includes(null) || !eat(')')) return null;
+    const fixed = a.every((x) => x.fixed);
+    return auto && !fixed ? null : { v: `repeat(${n}, ${a.map((x) => x.v).join(' ')})`, fixed, auto };
   };
   const out = [item()];
   while (out[out.length - 1] && eat('_')) out.push(item());
-  return out.includes(null) || i !== t.length ? null : out.join(' ');
+  if (out.includes(null) || i !== t.length) return null;
+  const autos = out.filter((x) => x.auto).length;
+  if (autos > 1 || (autos && !out.every((x) => x.fixed))) return null;
+  return out.map((x) => x.v).join(' ');
 }
 
 // ---------------------------------------------------------------- plugin order (Tailwind v3 corePlugins)
@@ -219,8 +249,10 @@ const pairs = (s) => s.split(';').map((x) => { const i = x.indexOf(':'); return 
 const STATIC = new Map();
 function st(key, entries, extra) { const o = O(key); for (const [k, d] of Object.entries(entries)) STATIC.set(k, Object.freeze({ o, d: pairs(d), ...extra })); }
 const each = (names, f, prefix = '') => Object.fromEntries(names.split(' ').map((n) => [prefix + n, f(n)]));
-st('sr', { 'sr-only': 'position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0, 0, 0, 0);white-space:nowrap;border-width:0',
-  'not-sr-only': 'position:static;width:auto;height:auto;padding:0;margin:0;overflow:visible;clip:auto;white-space:normal' });
+// The kit's sr-only hides with clip-path:inset(50%) (as Tailwind v4 does), so not-sr-only must undo
+// clip-path as well as clip, or `sr-only focus:not-sr-only` skip links stay invisible when focused.
+st('sr', { 'sr-only': 'position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0, 0, 0, 0);clip-path:inset(50%);white-space:nowrap;border-width:0',
+  'not-sr-only': 'position:static;width:auto;height:auto;padding:0;margin:0;overflow:visible;clip:auto;clip-path:none;white-space:normal' });
 st('pointer-events', { 'pointer-events-none': 'pointer-events:none', 'pointer-events-auto': 'pointer-events:auto' });
 st('visibility', { visible: 'visibility:visible', invisible: 'visibility:hidden', collapse: 'visibility:collapse' });
 st('position', each('static fixed absolute relative sticky', (n) => 'position:' + n));
@@ -268,7 +300,9 @@ st('space-x-rev', { 'space-x-reverse': '--tw-space-x-reverse:1' }, { child: CHIL
 st('space-y-rev', { 'space-y-reverse': '--tw-space-y-reverse:1' }, { child: CHILD });
 st('divide-x-rev', { 'divide-x-reverse': '--tw-divide-x-reverse:1' }, { child: CHILD });
 st('divide-y-rev', { 'divide-y-reverse': '--tw-divide-y-reverse:1' }, { child: CHILD });
-st('divide-style', each('solid dashed dotted double none', (n) => 'border-style:' + n, 'divide-'), { child: CHILD, needs: 'border' });
+// Style utilities also record the style in --tw-border-style, which width utilities read (Tailwind v4's
+// approach): `border-dotted md:border` stays dotted at md instead of the width class forcing solid.
+st('divide-style', each('solid dashed dotted double none', (n) => `--tw-border-style:${n};border-style:${n}`, 'divide-'), { child: CHILD, needs: 'border' });
 st('place-self', al('place-self', 'place-self', 'auto start end center stretch', PLACE));
 st('self', al('self', 'align-self', 'auto start end center stretch baseline'));
 st('justify-self', al('justify-self', 'justify-self', 'auto start end center stretch', PLACE));
@@ -280,7 +314,7 @@ st('hyphens', { 'hyphens-none': 'hyphens:none', 'hyphens-manual': 'hyphens:manua
 st('whitespace', al('whitespace', 'white-space', 'normal nowrap pre pre-line pre-wrap break-spaces', {}));
 st('text-wrap', { 'text-wrap': 'text-wrap:wrap', 'text-nowrap': 'text-wrap:nowrap', 'text-balance': 'text-wrap:balance', 'text-pretty': 'text-wrap:pretty' });
 st('break', { 'break-normal': 'overflow-wrap:normal;word-break:normal', 'break-words': 'overflow-wrap:break-word', 'break-all': 'word-break:break-all', 'break-keep': 'word-break:keep-all' });
-st('border-style', al('border', 'border-style', 'solid dashed dotted double hidden none', {}), { needs: 'border' });
+st('border-style', each('solid dashed dotted double hidden none', (n) => `--tw-border-style:${n};border-style:${n}`, 'border-'), { needs: 'border' });
 const DIRS = { t: 'top', tr: 'top right', r: 'right', br: 'bottom right', b: 'bottom', bl: 'bottom left', l: 'left', tl: 'top left' };
 st('bg-image', { 'bg-none': 'background-image:none', ...Object.fromEntries(Object.entries(DIRS).map(([k, d]) => [`bg-gradient-to-${k}`, `background-image:linear-gradient(to ${d}, var(--tw-gradient-stops))`])) });
 st('bg-size', { 'bg-auto': 'background-size:auto', 'bg-cover': 'background-size:cover', 'bg-contain': 'background-size:contain' });
@@ -319,7 +353,7 @@ function fn(prefix, key, f, opts = {}) { FN.set(prefix, { o: O(key), f, neg: !!o
 const decl = (props, x) => x == null ? null : props.map((p) => [p, x]);
 const signed = (x, n) => (n ? negate(x) : x);
 for (const [k, props] of Object.entries({ p: ['padding'], px: ['padding-left', 'padding-right'], py: ['padding-top', 'padding-bottom'], ps: ['padding-inline-start'], pe: ['padding-inline-end'],
-  pt: ['padding-top'], pr: ['padding-right'], pb: ['padding-bottom'], pl: ['padding-left'] })) fn(k, k, (v) => decl(props, sp(v)));
+  pt: ['padding-top'], pr: ['padding-right'], pb: ['padding-bottom'], pl: ['padding-left'] })) fn(k, k, (v) => decl(props, nn(sp(v))));
 for (const [k, props] of Object.entries({ m: ['margin'], mx: ['margin-left', 'margin-right'], my: ['margin-top', 'margin-bottom'], ms: ['margin-inline-start'], me: ['margin-inline-end'],
   mt: ['margin-top'], mr: ['margin-right'], mb: ['margin-bottom'], ml: ['margin-left'] })) fn(k, k, (v, n) => decl(props, signed(sp(v, { auto: 'auto' }), n)), { neg: true });
 for (const [k, props] of Object.entries({ inset: ['inset'], 'inset-x': ['left', 'right'], 'inset-y': ['top', 'bottom'], start: ['inset-inline-start'], end: ['inset-inline-end'],
@@ -328,23 +362,24 @@ fn('z', 'z', (v, n) => decl(['z-index'], signed(pick(Z, v, 'integer'), n)), { ne
 fn('order', 'order', (v, n) => decl(['order'], signed(pick(ORDER_SCALE, v, 'integer'), n)), { neg: true });
 const span = (v) => { if (own(SPAN, v)) return SPAN[v]; const n = arb(v, 'integer'); return n && (VAR.test(n) || +n > 0) ? `span ${n} / span ${n}` : null; };
 fn('col-span', 'col', (v) => decl(['grid-column'], span(v)));
-fn('col-start', 'col-start', (v) => decl(['grid-column-start'], pick(LINE, v, 'integer')));
-fn('col-end', 'col-end', (v) => decl(['grid-column-end'], pick(LINE, v, 'integer')));
+fn('col-start', 'col-start', (v) => decl(['grid-column-start'], lineNo(pick(LINE, v, 'integer'))));
+fn('col-end', 'col-end', (v) => decl(['grid-column-end'], lineNo(pick(LINE, v, 'integer'))));
 fn('row-span', 'row', (v) => decl(['grid-row'], span(v)));
-fn('row-start', 'row-start', (v) => decl(['grid-row-start'], pick(LINE, v, 'integer')));
-fn('row-end', 'row-end', (v) => decl(['grid-row-end'], pick(LINE, v, 'integer')));
-fn('line-clamp', 'line-clamp', (v) => { const x = pick(ints(1, 6), v, 'integer'); return x && [['overflow', 'hidden'], ['display', '-webkit-box'], ['-webkit-box-orient', 'vertical'], ['-webkit-line-clamp', x]]; });
+fn('row-start', 'row-start', (v) => decl(['grid-row-start'], lineNo(pick(LINE, v, 'integer'))));
+fn('row-end', 'row-end', (v) => decl(['grid-row-end'], lineNo(pick(LINE, v, 'integer'))));
+const CLAMP = ints(1, 6);
+fn('line-clamp', 'line-clamp', (v) => { const x = posInt(pick(CLAMP, v, 'integer')); return x && [['overflow', 'hidden'], ['display', '-webkit-box'], ['-webkit-box-orient', 'vertical'], ['-webkit-line-clamp', x]]; });
 fn('aspect', 'aspect', (v) => { const x = arb(v, 'ratio'); return decl(['aspect-ratio'], x && x.replace('/', ' / ')); });
-fn('size', 'size', (v) => decl(['width', 'height'], sp(v, SIZE)));
-fn('w', 'w', (v) => decl(['width'], sp(v, W)));
-fn('h', 'h', (v) => decl(['height'], sp(v, H)));
-fn('min-w', 'min-w', (v) => decl(['min-width'], sp(v, MIN_W)));
-fn('min-h', 'min-h', (v) => decl(['min-height'], sp(v, MIN_H)));
-fn('max-w', 'max-w', (v) => decl(['max-width'], sp(v, MAX_W)));
-fn('max-h', 'max-h', (v) => decl(['max-height'], sp(v, MAX_H)));
-fn('shrink', 'shrink', (v) => decl(['flex-shrink'], pick({ '': '1', 0: '0' }, v, 'number')));
-fn('grow', 'grow', (v) => decl(['flex-grow'], pick({ '': '1', 0: '0' }, v, 'number')));
-fn('basis', 'basis', (v) => decl(['flex-basis'], sp(v, BASIS)));
+fn('size', 'size', (v) => decl(['width', 'height'], nn(sp(v, SIZE))));
+fn('w', 'w', (v) => decl(['width'], nn(sp(v, W))));
+fn('h', 'h', (v) => decl(['height'], nn(sp(v, H))));
+fn('min-w', 'min-w', (v) => decl(['min-width'], nn(sp(v, MIN_W))));
+fn('min-h', 'min-h', (v) => decl(['min-height'], nn(sp(v, MIN_H))));
+fn('max-w', 'max-w', (v) => decl(['max-width'], nn(sp(v, MAX_W))));
+fn('max-h', 'max-h', (v) => decl(['max-height'], nn(sp(v, MAX_H))));
+fn('shrink', 'shrink', (v) => decl(['flex-shrink'], nn(pick({ '': '1', 0: '0' }, v, 'number'))));
+fn('grow', 'grow', (v) => decl(['flex-grow'], nn(pick({ '': '1', 0: '0' }, v, 'number'))));
+fn('basis', 'basis', (v) => decl(['flex-basis'], nn(sp(v, BASIS))));
 const tf = (vars) => (x) => x == null ? null : { d: [...vars.map((p) => [p, x]), ['transform', TRANSFORM]], needs: 'transform' };
 fn('translate-x', 'translate-x', (v, n) => tf(['--tw-translate-x'])(signed(sp(v, FRAC_SM), n)), { neg: true });
 fn('translate-y', 'translate-y', (v, n) => tf(['--tw-translate-y'])(signed(sp(v, FRAC_SM), n)), { neg: true });
@@ -361,32 +396,39 @@ const KEYFRAMES = {
   bounce: ['bounce 1s infinite', '@keyframes bounce{0%,100%{transform:translateY(-25%);animation-timing-function:cubic-bezier(0.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,0.2,1)}}'],
 };
 fn('animate', 'animate', (v) => own(KEYFRAMES, v) ? { d: [['animation', KEYFRAMES[v][0]]], kf: v } : null);
-fn('columns', 'columns', (v) => decl(['columns'], pick({ ...ints(1, 12), auto: 'auto' }, v, 'integer', 'length')));
-fn('auto-cols', 'auto-cols', (v) => decl(['grid-auto-columns'], pick(AUTO_TRACK, v)));
-fn('auto-rows', 'auto-rows', (v) => decl(['grid-auto-rows'], pick(AUTO_TRACK, v)));
-const tracks = (v) => own(GRID, v) ? GRID[v] : v.length > 2 && v[0] === '[' && v.endsWith(']') && !BAD.test(v) ? gridTemplate(v.slice(1, -1)) : null;
+const COLUMNS = { ...ints(1, 12), auto: 'auto' };
+fn('columns', 'columns', (v) => { const a = own(COLUMNS, v) ? { v: COLUMNS[v] } : arbitrary(v, ['integer', 'dim']); return decl(['columns'], a && (a.k === 'integer' ? posInt(a.v) : nn(a.v))); });
+const arbTracks = (v) => v.length > 2 && v[0] === '[' && v.endsWith(']') && !BAD.test(v) ? gridTemplate(v.slice(1, -1)) : null;
+const tracks = (v) => own(GRID, v) ? GRID[v] : arbTracks(v);
+// grid-auto-columns/rows take a list of track sizes (no repeat()): auto-rows-[minmax(4rem,auto)].
+const autoTracks = (v) => { if (own(AUTO_TRACK, v)) return AUTO_TRACK[v]; const x = arbTracks(v); return x && !x.includes('repeat(') ? x : null; };
+fn('auto-cols', 'auto-cols', (v) => decl(['grid-auto-columns'], autoTracks(v)));
+fn('auto-rows', 'auto-rows', (v) => decl(['grid-auto-rows'], autoTracks(v)));
 fn('grid-cols', 'grid-cols', (v) => decl(['grid-template-columns'], tracks(v)));
 fn('grid-rows', 'grid-rows', (v) => decl(['grid-template-rows'], tracks(v)));
-fn('gap', 'gap', (v) => decl(['gap'], sp(v)));
-fn('gap-x', 'gap-x', (v) => decl(['column-gap'], sp(v)));
-fn('gap-y', 'gap-y', (v) => decl(['row-gap'], sp(v)));
+fn('gap', 'gap', (v) => decl(['gap'], nn(sp(v))));
+fn('gap-x', 'gap-x', (v) => decl(['column-gap'], nn(sp(v))));
+fn('gap-y', 'gap-y', (v) => decl(['row-gap'], nn(sp(v))));
 fn('space-x', 'space-x', (v, n) => { const x = signed(sp(v), n); return x && [['--tw-space-x-reverse', '0'], ['margin-right', `calc(${x} * var(--tw-space-x-reverse))`], ['margin-left', `calc(${x} * calc(1 - var(--tw-space-x-reverse)))`]]; }, { neg: true, child: CHILD });
 fn('space-y', 'space-y', (v, n) => { const x = signed(sp(v), n); return x && [['--tw-space-y-reverse', '0'], ['margin-top', `calc(${x} * calc(1 - var(--tw-space-y-reverse)))`], ['margin-bottom', `calc(${x} * var(--tw-space-y-reverse))`]]; }, { neg: true, child: CHILD });
-fn('divide-x', 'divide-x', (v) => { const w = pick(BORDER_W, v, 'length'); return w && [['--tw-divide-x-reverse', '0'], ['border-right-width', `calc(${w} * var(--tw-divide-x-reverse))`], ['border-left-width', `calc(${w} * calc(1 - var(--tw-divide-x-reverse)))`], ['border-right-style', 'solid'], ['border-left-style', 'solid']]; }, { child: CHILD, needs: 'border' });
-fn('divide-y', 'divide-y', (v) => { const w = pick(BORDER_W, v, 'length'); return w && [['--tw-divide-y-reverse', '0'], ['border-top-width', `calc(${w} * calc(1 - var(--tw-divide-y-reverse)))`], ['border-bottom-width', `calc(${w} * var(--tw-divide-y-reverse))`], ['border-top-style', 'solid'], ['border-bottom-style', 'solid']]; }, { child: CHILD, needs: 'border' });
+// Width utilities draw with the element's --tw-border-style (solid from the layered reset unless a
+// border-dashed/dotted/... utility set it), so a responsive or state width class keeps the chosen style.
+const BSTYLE = 'var(--tw-border-style, solid)';
+fn('divide-x', 'divide-x', (v) => { const w = nn(pick(BORDER_W, v, 'dim')); return w && [['--tw-divide-x-reverse', '0'], ['border-right-width', `calc(${w} * var(--tw-divide-x-reverse))`], ['border-left-width', `calc(${w} * calc(1 - var(--tw-divide-x-reverse)))`], ['border-right-style', BSTYLE], ['border-left-style', BSTYLE]]; }, { child: CHILD, needs: 'border' });
+fn('divide-y', 'divide-y', (v) => { const w = nn(pick(BORDER_W, v, 'dim')); return w && [['--tw-divide-y-reverse', '0'], ['border-top-width', `calc(${w} * calc(1 - var(--tw-divide-y-reverse)))`], ['border-bottom-width', `calc(${w} * var(--tw-divide-y-reverse))`], ['border-top-style', BSTYLE], ['border-bottom-style', BSTYLE]]; }, { child: CHILD, needs: 'border' });
 fn('divide', 'divide-color', (v) => decl(['border-color'], color(v)), { child: CHILD, needs: 'border' });
 const CORNERS = { '': ['border-radius'], s: ['border-start-start-radius', 'border-end-start-radius'], e: ['border-start-end-radius', 'border-end-end-radius'],
   t: ['border-top-left-radius', 'border-top-right-radius'], r: ['border-top-right-radius', 'border-bottom-right-radius'], b: ['border-bottom-right-radius', 'border-bottom-left-radius'],
   l: ['border-top-left-radius', 'border-bottom-left-radius'], ss: ['border-start-start-radius'], se: ['border-start-end-radius'], ee: ['border-end-end-radius'], es: ['border-end-start-radius'],
   tl: ['border-top-left-radius'], tr: ['border-top-right-radius'], br: ['border-bottom-right-radius'], bl: ['border-bottom-left-radius'] };
-for (const [c, props] of Object.entries(CORNERS)) fn(c ? 'rounded-' + c : 'rounded', c ? 'rounded-' + c : 'rounded', (v) => decl(props, pick(RADIUS, v, 'length')));
+for (const [c, props] of Object.entries(CORNERS)) fn(c ? 'rounded-' + c : 'rounded', c ? 'rounded-' + c : 'rounded', (v) => decl(props, nn(pick(RADIUS, v, 'length'))));
 const SIDES = { '': [''], x: ['-left', '-right'], y: ['-top', '-bottom'], s: ['-inline-start'], e: ['-inline-end'], t: ['-top'], r: ['-right'], b: ['-bottom'], l: ['-left'] };
 for (const [s, sides] of Object.entries(SIDES)) {
   const k = s ? `border-${s}` : 'border';
   fn(k, k + '-w', (v) => {
-    const c = own(BORDER_W, v) ? null : color(v), w = own(BORDER_W, v) ? BORDER_W[v] : c ? null : arb(v, 'length');
+    const c = own(BORDER_W, v) ? null : color(v), w = own(BORDER_W, v) ? BORDER_W[v] : c ? null : nn(arb(v, 'dim'));
     if (c) return { d: decl(sides.map((x) => `border${x}-color`), c), o: O(k + '-c') };
-    return w && [...sides.map((x) => [`border${x}-width`, w]), ...sides.map((x) => [`border${x}-style`, 'solid'])];
+    return w && [...sides.map((x) => [`border${x}-width`, w]), ...sides.map((x) => [`border${x}-style`, BSTYLE])];
   }, { needs: 'border' });
 }
 fn('bg', 'bg', (v) => decl(['background-color'], color(v)));
@@ -394,7 +436,7 @@ fn('from', 'gradient-from', (v) => { const c = color(v); return c && { d: [['--t
 fn('via', 'gradient-via', (v) => { const c = color(v); return c && { d: [['--tw-gradient-to', 'transparent var(--tw-gradient-to-position)'], ['--tw-gradient-stops', `var(--tw-gradient-from), ${c} var(--tw-gradient-via-position), var(--tw-gradient-to)`]], needs: 'gradient' }; });
 fn('to', 'gradient-to', (v) => { const c = color(v); return c && { d: [['--tw-gradient-to', `${c} var(--tw-gradient-to-position)`]], needs: 'gradient' }; });
 fn('fill', 'fill', (v) => decl(['fill'], color(v)));
-fn('stroke', 'stroke', (v) => { const c = color(v); return c ? [['stroke', c]] : { d: decl(['stroke-width'], pick({ 0: '0', 1: '1', 2: '2' }, v, 'number', 'length')), o: O('stroke-w') }; });
+fn('stroke', 'stroke', (v) => { const c = color(v); return c ? [['stroke', c]] : { d: decl(['stroke-width'], nn(pick({ 0: '0', 1: '1', 2: '2' }, v, 'number', 'length'))), o: O('stroke-w') }; });
 fn('indent', 'indent', (v, n) => decl(['text-indent'], signed(sp(v), n)), { neg: true });
 fn('font', 'font-weight', (v) => {
   if (own(FONT_FAMILY, v)) return { d: [['font-family', FONT_FAMILY[v]]], o: O('font-family') };
@@ -404,19 +446,19 @@ fn('font', 'font-weight', (v) => {
 fn('text', 'font-size', (v) => {
   const [b, m] = splitMod(v);
   if (own(FONT_SIZE, b)) {
-    const lh = m == null ? FONT_SIZE[b][1] : pick(LEADING, m, 'number', 'length');
+    const lh = m == null ? FONT_SIZE[b][1] : nn(pick(LEADING, m, 'number', 'length'));
     return lh && [['font-size', FONT_SIZE[b][0]], ['line-height', lh]];
   }
   const c = color(v);
   if (c) return { d: [['color', c]], o: O('text-color') };
-  return decl(['font-size'], arb(v, 'length'));
+  return decl(['font-size'], nn(arb(v, 'length')));
 });
-fn('leading', 'leading', (v) => decl(['line-height'], pick(LEADING, v, 'number', 'length')));
-fn('tracking', 'tracking', (v, n) => decl(['letter-spacing'], signed(pick(TRACKING, v, 'length'), n)), { neg: true });
+fn('leading', 'leading', (v) => decl(['line-height'], nn(pick(LEADING, v, 'number', 'length'))));
+fn('tracking', 'tracking', (v, n) => decl(['letter-spacing'], signed(pick(TRACKING, v, 'dim'), n)), { neg: true });
 fn('decoration', 'decoration-thickness', (v) => {
   const c = color(v);
   if (c) return { d: [['text-decoration-color', c]], o: O('decoration-color') };
-  return decl(['text-decoration-thickness'], pick({ auto: 'auto', 'from-font': 'from-font', ...WIDTH5 }, v, 'length'));
+  return decl(['text-decoration-thickness'], nn(pick({ auto: 'auto', 'from-font': 'from-font', ...WIDTH5 }, v, 'length')));
 });
 fn('underline-offset', 'underline-offset', (v) => decl(['text-underline-offset'], pick({ auto: 'auto', ...WIDTH5 }, v, 'length')));
 fn('placeholder', 'placeholder-color', (v) => { const c = color(v); return c && { d: [['color', c]], pe: '::placeholder' }; });
@@ -432,24 +474,27 @@ fn('shadow', 'shadow', (v) => {
 fn('outline', 'outline-w', (v) => {
   const c = color(v);
   if (c) return { d: [['outline-color', c]], o: O('outline-color') };
-  return decl(['outline-width'], pick(WIDTH5, v, 'length'));
+  return decl(['outline-width'], nn(pick(WIDTH5, v, 'dim')));
 });
-fn('outline-offset', 'outline-offset', (v) => decl(['outline-offset'], pick(WIDTH5, v, 'length')));
+fn('outline-offset', 'outline-offset', (v) => decl(['outline-offset'], pick(WIDTH5, v, 'dim')));
 fn('ring', 'ring-w', (v) => {
   const w = own(RING_W, v) ? RING_W[v] : null, c = w ? null : color(v);
   if (c) return { d: [['--tw-ring-color', c]], o: O('ring-color') };
-  const x = w || arb(v, 'length');
+  const x = w || nn(arb(v, 'dim'));
   return x && [['--tw-ring-offset-shadow', 'var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color)'],
     ['--tw-ring-shadow', `var(--tw-ring-inset) 0 0 0 calc(${x} + var(--tw-ring-offset-width)) var(--tw-ring-color)`], ['box-shadow', 'var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000)']];
 }, { needs: 'ring' });
 fn('ring-offset', 'ring-offset-w', (v) => {
   const c = own(WIDTH5, v) ? null : color(v);
   if (c) return { d: [['--tw-ring-offset-color', c]], o: O('ring-offset-color') };
-  return decl(['--tw-ring-offset-width'], pick(WIDTH5, v, 'length'));
+  return decl(['--tw-ring-offset-width'], nn(pick(WIDTH5, v, 'dim')));
 }, { needs: 'ring' });
-fn('blur', 'filter', (v) => { const x = pick(BLUR, v, 'length'); return decl(['filter'], x && `blur(${x})`); });
-fn('grayscale', 'filter', (v) => { const x = pick({ '': '100%', 0: '0' }, v); return decl(['filter'], x && `grayscale(${x})`); });
-fn('backdrop-blur', 'backdrop', (v) => { const x = pick(BLUR, v, 'length'); return decl(['-webkit-backdrop-filter', 'backdrop-filter'], x && `blur(${x})`); });
+// blur and grayscale compose through --tw-* functions (reset to empty on every element) like Tailwind, so
+// `blur-sm grayscale` applies both instead of the later class replacing the filter.
+const FILTER = 'var(--tw-blur) var(--tw-grayscale)';
+fn('blur', 'filter', (v) => { const x = nn(pick(BLUR, v, 'dim')); return x && { d: [['--tw-blur', `blur(${x})`], ['filter', FILTER]], needs: 'filter' }; });
+fn('grayscale', 'filter', (v) => { const x = pick({ '': '100%', 0: '0' }, v); return x && { d: [['--tw-grayscale', `grayscale(${x})`], ['filter', FILTER]], needs: 'filter' }; });
+fn('backdrop-blur', 'backdrop', (v) => { const x = nn(pick(BLUR, v, 'dim')); return decl(['-webkit-backdrop-filter', 'backdrop-filter'], x && `blur(${x})`); });
 fn('duration', 'duration', (v) => decl(['transition-duration'], pick(DURATION, v, 'time')));
 fn('delay', 'delay', (v) => decl(['transition-delay'], pick(DURATION, v, 'time')));
 const CONTAINER = Object.freeze({ o: O('container'), d: [['width', '100%'], ['margin-right', 'auto'], ['margin-left', 'auto']], extra: SCREENS.map(([, w]) => [['max-width', w + 'px']]) });
@@ -494,6 +539,7 @@ function variants(list) {
 // ---------------------------------------------------------------- class resolution
 // CSSOM CSS.escape(): https://drafts.csswg.org/cssom/#serialize-an-identifier
 function escapeClass(s) {
+  s = String(s ?? '');
   let out = '';
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
@@ -584,6 +630,7 @@ const RESETS = {
   transform: '--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;',
   ring: '--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:var(--background, #fff);--tw-ring-color:color-mix(in oklab, var(--accent, #3b82f6) 50%, transparent);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;',
   gradient: '--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;',
+  filter: '--tw-blur: ;--tw-grayscale: ;',
 };
 // Bare class names that are also Forma kit components (spec section 2: container, sr-only, table,
 // list-item, plus whatever kit.KIT_CLASSES lists). Kit rules have zero specificity and load first, so a
@@ -614,13 +661,14 @@ function utilityCSS(classNames, tokens) {
   if (!rules.length) return '';
   rules.sort((a, b) => a.key - b.key || a.o - b.o || (a.cls < b.cls ? -1 : a.cls > b.cls ? 1 : 0));
   const out = [];
-  const vars = ['transform', 'ring', 'gradient'].filter((k) => needs.has(k)).map((k) => RESETS[k]).join('');
+  const vars = ['transform', 'ring', 'gradient', 'filter'].filter((k) => needs.has(k)).map((k) => RESETS[k]).join('');
   if (vars) out.push(`*,::before,::after{${vars}}`);
   // Tailwind's preflight border reset (width 0, solid, default colour), scoped to elements that carry a
   // border utility and placed in a cascade layer: every unlayered rule (kit components such as
   // `card border-accent`, utilities, model CSS) beats it, while browser defaults do not. Width utilities
-  // also set the style of the sides they size, so `border` works where the kit resets with border:0.
-  if (resets.size) out.push(`@layer forma-preflight{:where(${[...resets].sort().join(',')}){border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}:where(hr){border-top-width:1px}}`);
+  // also set the style of the sides they size (from --tw-border-style, reset here so it never inherits),
+  // so `border` works where the kit resets with border:0.
+  if (resets.size) out.push(`@layer forma-preflight{:where(${[...resets].sort().join(',')}){--tw-border-style:solid;border-width:0;border-style:solid;border-color:var(--border, #e5e7eb)}:where(hr){border-top-width:1px}}`);
   for (const k of [...kfs].sort()) out.push(KEYFRAMES[k][1]);
   let media = '', block = null;
   for (const r of rules) {
@@ -663,7 +711,7 @@ Flex/grid: flex-col flex-wrap flex-1 grow shrink-0 basis-1/3, grid-cols-1…12 c
 Spacing scale 0 px 0.5 1 1.5 2 … 12 14 16 20 24 … 96 for p- px- py- pt-…, m- (mx-auto, -mt-2), gap, inset.
 Sizing w- h- size- min-w- min-h- max-w- max-h-: scale, fractions (w-1/2), full, screen, fit; max-w-xs…7xl, max-w-prose.
 Type: text-xs…9xl (text-sm/6 sets line height), font-normal medium semibold bold, font-sans serif mono heading, leading-*, tracking-*, text-left center right, uppercase, italic, underline, truncate, line-clamp-1…6, whitespace-nowrap, break-words, tabular-nums.
-Colours for bg- text- border- divide- ring- outline- fill- stroke- placeholder- shadow- from- via- to- (bg-gradient-to-r): tokens accent accent-2 accent-soft accent-strong background surface text muted border success warning danger on-accent (bg-accent text-on-accent, text-muted, border-border); white black transparent current; Tailwind palette slate…rose 50–950. Prefer tokens. Opacity modifier: bg-accent/10, bg-black/50.
+Colours for bg- text- border- divide- ring- outline- fill- stroke- placeholder- shadow- from- via- to- (bg-gradient-to-r): tokens accent accent-2 accent-soft accent-strong background surface surface-2 text muted border border-strong success warning danger info (+ -soft -strong) on-accent chart-1…6 (bg-accent text-on-accent, text-muted, border-border, bg-danger-soft text-danger-strong); white black transparent current; Tailwind palette slate…rose 50–950. Prefer tokens. Opacity modifier: bg-accent/10, bg-black/50.
 Effects: border border-2 border-t border-dashed, rounded-sm…3xl rounded-full (follow the design radius), shadow-sm…2xl, ring-2 ring-offset-2, outline-none, opacity-*, transition-colors duration-200 ease-out, translate-* scale-* rotate-*, animate-spin animate-pulse, backdrop-blur, cursor-pointer, select-none.
 Variants: sm: md: lg: xl: 2xl: (mobile-first min-width), hover: focus: focus-visible: active: disabled: first: last: odd: even: placeholder: group-hover: (parent has class group), aria-selected:, motion-reduce:. !font-bold = important. dark: is ignored.
 Arbitrary values only for lengths, percentages, numbers, #hex or var(--name): p-[18px], top-[var(--header-h)], bg-[#0f766e]. calc(), url(), quotes and arbitrary properties are dropped.`;

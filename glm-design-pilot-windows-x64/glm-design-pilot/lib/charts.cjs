@@ -52,7 +52,7 @@ function validateChart(spec) {
   }
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw invalid('Chart data must be a JSON object.');
   const type = spec.type ?? 'bar';
-  if (!TYPES.includes(type)) throw invalid(`Unknown chart type "${short(type)}". Use one of: ${TYPES.join(', ')}.`);
+  if (!TYPES.includes(type)) throw invalid(`Unknown chart type "${typeof type === 'string' ? short(type) : typeof type}". Use one of: ${TYPES.join(', ')}.`);
   const title = text(spec.title, 'Chart title', 160);
   const caption = text(spec.caption, 'Chart caption', 300);
   const unit = text(spec.unit, 'Chart unit', 12);
@@ -95,21 +95,27 @@ function validateChart(spec) {
 const MINUS = '−';
 const SCALES = [[1e12, 'T'], [1e9, 'B'], [1e6, 'M'], [1e3, 'k']];
 const trimZeros = (s) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+// Fewest decimals that write x exactly (relative tolerance, so 1e-7 needs 7, 1234567.5 needs 1).
 const decimals = (x) => {
-  for (let k = 0; k < 4; k++) if (Math.abs(Math.round(x * 10 ** k) - x * 10 ** k) < 1e-6 * 10 ** k) return k;
-  return 3;
+  for (let k = 0; k < 20; k++) {
+    const y = Math.abs(x) * 10 ** k;
+    if (Math.abs(y - Math.round(y)) <= 1e-9 * Math.max(1, y)) return k;
+  }
+  return 20;
 };
+// Decimals that keep two significant digits of a value below 1 (0.0045 -> 4).
+const smallDigits = (a) => Math.min(20, 1 - Math.floor(Math.log10(a)));
 function plain(v, digits) {
   const s = trimZeros(Math.abs(v).toFixed(digits));
   const [i, f] = s.split('.');
   return (v < 0 && Number(s) !== 0 ? MINUS : '') + i.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (f ? '.' + f : '');
 }
 // Exact-ish value for tables and tooltips: 1,234.57 or 0.0045.
-const full = (v) => plain(v, v !== 0 && Math.abs(v) < 1 ? Math.min(6, 1 - Math.floor(Math.log10(Math.abs(v)))) : 2);
-// Short value for labels: 1,284 / 45.3 / 12.9k / 4.2M.
+const full = (v) => plain(v, v !== 0 && Math.abs(v) < 1 ? smallDigits(Math.abs(v)) : 2);
+// Short value for labels: 1,284 / 45.3 / 12.9k / 4.2M / 0.0045.
 function compact(v) {
   const a = Math.abs(v);
-  if (a < 1e4) return plain(v, a >= 100 ? 0 : a >= 10 ? 1 : 2);
+  if (a < 1e4) return plain(v, a >= 100 ? 0 : a >= 10 ? 1 : a >= 1 || a === 0 ? 2 : smallDigits(a));
   let i = SCALES.findIndex(([d]) => a >= d);
   let t = trimZeros((a / SCALES[i][0]).toFixed(a / SCALES[i][0] < 100 ? 1 : 0));
   if (Number(t) >= 1000 && i > 0) t = trimZeros((a / SCALES[--i][0]).toFixed(1));
@@ -135,32 +141,47 @@ const pct = (v, total) => {
 };
 // Nice axis: steps of 1, 2, 2.5 or 5 × 10^n giving about `count` intervals.
 function niceTicks(lo, hi, count = 5, integers = false) {
-  if (!(hi > lo)) {
-    if (hi === 0) hi = 1;
-    else if (hi > 0) lo = 0;
-    else hi = 0;
+  // Flat data, or a range too small for doubles to step through: axis from zero to the value.
+  if (!(hi - lo > Math.max(Math.abs(lo), Math.abs(hi)) * 1e-12)) {
+    const v = Math.abs(hi) >= Math.abs(lo) ? hi : lo;
+    [lo, hi] = v > 0 ? [0, v] : v < 0 ? [v, 0] : [0, 1];
   }
+  if (!(hi - lo >= 1e-200)) [lo, hi] = [0, 1]; // denormal-sized data
   const raw = (hi - lo) / count, mag = 10 ** Math.floor(Math.log10(raw));
   let steps = [1, 2, 2.5, 5, 10].map((m) => m * mag);
   if (integers) steps = steps.filter((s) => s >= 1 && Math.abs(s - Math.round(s)) < 1e-9);
   if (!steps.length) steps = [1];
   const step = steps.find((s) => s >= raw * 0.999) ?? steps[steps.length - 1];
-  const dp = Math.min(12, Math.max(0, Math.ceil(-Math.log10(step)) + 1));
+  const dp = Math.min(100, Math.max(0, Math.ceil(-Math.log10(step)) + 1));
   const min = Math.floor(lo / step + 1e-9) * step, ticks = [];
   for (let i = 0; i <= 60; i++) {
     const t = Number((min + i * step).toFixed(dp));
     ticks.push(t);
     if (t >= hi - step * 1e-9) break;
   }
+  // Never hand back a degenerate scale (it would put NaN into every coordinate).
+  if (!(ticks.length > 1 && ticks[ticks.length - 1] > ticks[0] && ticks.every(Number.isFinite))) return { min: lo, max: hi, step: hi - lo, ticks: [lo, hi] };
   return { min: ticks[0], max: ticks[ticks.length - 1], step, ticks };
 }
 
 // ---- drawing helpers ------------------------------------------------------
 const chars = (s) => Array.from(String(s));
-const width = (s, size = 12) => chars(s).length * size * 0.58;
-const clip = (s, max) => {
-  const c = chars(s);
-  return c.length <= max ? String(s) : c.slice(0, Math.max(1, max - 1)).join('').trimEnd() + '…';
+// Approximate advance widths (em) of a UI sans at text sizes, erring wide: East
+// Asian wide characters and emoji 1em, wide letters 0.88, capitals 0.7, digits
+// 0.62, narrow glyphs 0.34, everything else 0.58.
+const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]/u;
+const advance = (c) => (WIDE.test(c) ? 1 : /[mwMW@%—]/.test(c) ? 0.88 : /[A-Z#&]/.test(c) ? 0.7 : /[0-9$€£¥+=<>~^_±×−–?]/.test(c) ? 0.62 : /[ijlI.,:;'"!|()[\]{}/ frt]/.test(c) ? 0.34 : 0.58);
+const width = (s, size = 12) => chars(s).reduce((n, c) => n + advance(c), 0) * size;
+// Truncate with an ellipsis to fit `px` at `size` (always keeps one character).
+const clip = (s, px, size = 12) => {
+  if (width(s, size) <= px) return String(s);
+  let out = '', used = advance('…') * size;
+  for (const c of chars(s)) {
+    if (out && used + advance(c) * size > px) break;
+    out += c;
+    used += advance(c) * size;
+  }
+  return out.trimEnd() + '…';
 };
 const n1 = (v) => {
   const x = Math.round(v * 10) / 10;
@@ -226,7 +247,7 @@ function monotone(pts) {
 function svgLegend(c, w, line) {
   let x = 0, y = 0, out = '';
   for (const [i, s] of c.series.entries()) {
-    const name = clip(s.name, 28), itemW = 16 + width(name) + 18;
+    const name = clip(s.name, 190), itemW = 16 + width(name) + 18;
     if (x && x + itemW > w) {
       x = 0;
       y += 20;
@@ -244,11 +265,11 @@ function xAxisLabels(labels, at, slot, y, w) {
   const longest = Math.max(...labels.map((l) => width(l)));
   let k = 1;
   while (k < labels.length && slot * k < Math.min(longest, width('x'.repeat(7))) + 10) k++;
-  const max = Math.max(3, Math.floor((slot * k - 8) / width('x')));
+  const budget = Math.max(width('xxx'), slot * k - 8);
   let out = '';
   labels.forEach((l, i) => {
     if (i % k) return;
-    const t = clip(l, max), tw = width(t);
+    const t = clip(l, budget), tw = width(t);
     const x = Math.min(Math.max(at(i), tw / 2 + 2), w - tw / 2 - 2);
     out += `<text x="${n1(x)}" y="${n1(y)}">${esc(t)}</text>`;
   });
@@ -348,7 +369,6 @@ function horizontal(c, v, legend, variant) {
   const vals = single ? c.series[0].values.map((val) => unitize(compact(val), c.unit)) : [];
   const valueW = single ? Math.max(...vals.map((s) => width(s))) + 10 : 0;
   const labelW = Math.min(Math.max(...c.labels.map((l) => width(l))), Math.floor(w * 0.36));
-  const maxChars = Math.max(3, Math.floor(labelW / width('x')));
   // Labels of negative bars sit left of the bar end: keep room for them before the plot.
   const negW = single ? Math.max(0, ...vals.filter((_, i) => c.series[0].values[i] < 0).map((s) => width(s) + 8)) : 0;
   const x0 = Math.ceil(labelW + 12 + negW), x1 = w - Math.max(12, valueW + 4);
@@ -364,7 +384,7 @@ function horizontal(c, v, legend, variant) {
   }
   axis += `<path d="M${n1(base)} ${y0}V${n1(y0 + plotH)}" style="fill:none;stroke:${MUTED};stroke-opacity:0.45;stroke-width:1" vector-effect="non-scaling-stroke"/>`;
   axis += `<g font-size="12" text-anchor="end" style="fill:currentColor">${c.labels
-    .map((l, i) => `<text x="${n1(labelW)}" y="${n1(y0 + i * row + row / 2)}" dy="0.32em">${esc(clip(l, maxChars))}</text>`)
+    .map((l, i) => `<text x="${n1(labelW)}" y="${n1(y0 + i * row + row / 2)}" dy="0.32em">${esc(clip(l, Math.max(labelW, width('xxx'))))}</text>`)
     .join('')}</g>`;
   let marks = '', labels = '';
   c.labels.forEach((_, i) => {
@@ -388,8 +408,13 @@ function arc(cx, cy, R, r, a0, a1) {
     const ring = (rad, sweep) => `M${n1(cx)} ${n1(cy - rad)}A${n1(rad)} ${n1(rad)} 0 1 ${sweep} ${n1(cx)} ${n1(cy + rad)}A${n1(rad)} ${n1(rad)} 0 1 ${sweep} ${n1(cx)} ${n1(cy - rad)}Z`;
     return ring(R, 1) + (r ? ring(r, 0) : '');
   }
-  const large = a1 - a0 > Math.PI ? 1 : 0;
-  return `M${p(R, a0)}A${n1(R)} ${n1(R)} 0 ${large} 1 ${p(R, a1)}` + (r ? `L${p(r, a1)}A${n1(r)} ${n1(r)} 0 ${large} 0 ${p(r, a0)}Z` : `L${n1(cx)} ${n1(cy)}Z`);
+  // Slices over half a turn are drawn as two arcs: one large arc whose (rounded)
+  // endpoints coincide, as for a 99.99% slice, would be dropped by the renderer.
+  const mid = a1 - a0 > Math.PI ? [(a0 + a1) / 2] : [];
+  const outer = [...mid, a1].map((a) => `A${n1(R)} ${n1(R)} 0 0 1 ${p(R, a)}`).join('');
+  if (!r) return `M${p(R, a0)}${outer}L${n1(cx)} ${n1(cy)}Z`;
+  const inner = [...mid, a0].map((a) => `A${n1(r)} ${n1(r)} 0 0 0 ${p(r, a)}`).join('');
+  return `M${p(R, a0)}${outer}L${p(r, a1)}${inner}Z`;
 }
 function radial(c, legend) {
   const donut = c.type === 'donut', v = c.series[0].values, total = v.reduce((a, b) => a + b, 0);
@@ -408,7 +433,7 @@ function radial(c, legend) {
   }
   let w = size, items = '';
   if (legend) {
-    const rows = c.labels.map((l, i) => [clip(l, 24), unitize(compact(v[i]), c.unit) + (c.unit === '%' ? '' : ` · ${pct(v[i], total)}`)]);
+    const rows = c.labels.map((l, i) => [clip(l, 170), unitize(compact(v[i]), c.unit) + (c.unit === '%' ? '' : ` · ${pct(v[i], total)}`)]);
     const colW = Math.max(...rows.map(([l, s]) => width(l) + width(s) + 20)), y0 = Math.max(8, cy - (rows.length * 22) / 2);
     items = `<g aria-hidden="true" font-size="12">${rows
       .map(([l, s], i) => `<rect x="${size + 24}" y="${n1(y0 + i * 22 + 1)}" width="10" height="10" rx="3" style="fill:${seriesColor(i)}"/><text x="${size + 40}" y="${n1(y0 + i * 22 + 6)}" dy="0.32em" style="fill:currentColor">${esc(l)}</text><text x="${n1(size + 40 + colW)}" y="${n1(y0 + i * 22 + 6)}" dy="0.32em" text-anchor="end" style="fill:${MUTED};font-variant-numeric:tabular-nums">${esc(s)}</text>`)
@@ -432,7 +457,7 @@ function chartSVG(spec, opts = {}) {
   const c = validateChart(spec), legend = opts.legend !== false;
   if (c.type === 'sparkline') return sparkline(c);
   if (c.type === 'pie' || c.type === 'donut') return radial(c, legend);
-  const base = VARIANTS[opts.variant] || VARIANTS.md;
+  const base = (Object.hasOwn(VARIANTS, opts.variant) && VARIANTS[opts.variant]) || VARIANTS.md;
   const v = { w: Math.min(2000, Math.max(200, Number(opts.width) || base.w)), h: Math.min(1200, Math.max(120, Number(opts.height) || base.h)), ticks: base.ticks };
   return (c.type === 'hbar' ? horizontal : cartesian)(c, v, legend, null);
 }
@@ -474,16 +499,28 @@ function chartHTML(spec) {
 function invalidNotice(message) {
   return `<div data-forma-generated="" role="note" class="forma-chart-invalid" style="padding:12px 14px;border:1px dashed var(--danger,#d92d20);border-radius:var(--radius,8px);background:color-mix(in oklab,var(--danger,#d92d20) 7%,transparent);font-size:13px;line-height:1.45"><strong style="font-weight:600;color:var(--danger,#b42318)">Chart data invalid:</strong> ${esc(message)}</div>`;
 }
+// Each drawn chart adds up to ~70 KB; past this many per call hosts get a notice instead.
+const MAX_CHARTS = 120;
 // Fill every <figure|div data-chart> with its chart (or a visible notice when the
 // spec is invalid). The host keeps its attributes and children and gains
 // data-forma-expanded="chart" plus data-forma-source (its original outer HTML).
+// A host nested inside another host is left alone: it is already part of the
+// outer host's data-forma-source (and the inspector skips it), and copying every
+// level's subtree again would make the output grow quadratically.
 function expandCharts(html) {
   html = String(html ?? '');
   if (!/data-chart/i.test(html)) return html;
-  const hosts = findElements(html, (name, a) => (name === 'figure' || name === 'div') && Object.hasOwn(a, 'data-chart') && !Object.hasOwn(a, 'data-forma-expanded'));
+  let coveredTo = -1, drawn = 0;
+  // Already expanded hosts still cover their subtree, which keeps a second pass idempotent.
+  const hosts = findElements(html, (name, a) => (name === 'figure' || name === 'div') && Object.hasOwn(a, 'data-chart')).filter((el) => {
+    if (el.start < coveredTo) return false;
+    coveredTo = el.end;
+    return !Object.hasOwn(el.attribs, 'data-forma-expanded');
+  });
   const edits = hosts.map((el) => {
     let body;
     try {
+      if (++drawn > MAX_CHARTS) throw invalid(`Too many charts on one page; only the first ${MAX_CHARTS} are drawn.`);
       body = chartHTML(el.attribs['data-chart']);
     } catch (e) {
       body = invalidNotice(e.code === 'chart' ? e.message : 'The chart could not be drawn.');

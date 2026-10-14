@@ -37,6 +37,8 @@ const chroma = h => { const [, a, b] = oklab(h); return Math.hypot(a, b); };
 const hue = h => { const [, a, b] = oklab(h); return (Math.atan2(b, a) * 180 / Math.PI + 360) % 360; };
 const hueGap = (x, y) => { const d = Math.abs(hue(x) - hue(y)) % 360; return Math.min(d, 360 - d); };
 const isDark = bg => luminance(bg) < 0.18;
+// Perceptually indistinguishable at chart-mark size (OKLab distance).
+const near = (x, y) => { const a = oklab(x), b = oklab(y); return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < 0.06; };
 
 // ---- token normalisation ----
 const COLORS = ['accent', 'accent2', 'background', 'surface', 'text', 'muted', 'border', 'success', 'warning', 'danger'];
@@ -48,10 +50,16 @@ const HUES = {
   dark: ['#38bdf8', '#fbbf24', '#34d399', '#fb7185', '#a78bfa', '#2dd4bf', '#f472b6', '#a3e635', '#fb923c', '#818cf8'],
 };
 const FONT_KEYS = Object.keys(FONTS);
+// Accepts a FONTS key in any case or a CSS font-family stack; the first bundled or system family in the stack wins
+// ("'Söhne', 'Inter', sans-serif" -> Inter, "-apple-system, 'Segoe UI', Roboto" -> Segoe UI).
 function fontKey(v) {
   if (typeof v !== 'string') return null;
-  const first = v.split(',')[0].trim().replace(/^["']|["']$/g, '').trim().toLowerCase();
-  return FONT_KEYS.find(k => k.toLowerCase() === first) || null;
+  for (const part of v.slice(0, 400).split(',', 12)) {
+    const name = part.trim().replace(/^["']|["']$/g, '').trim().toLowerCase();
+    const k = name && FONT_KEYS.find(f => f.toLowerCase() === name);
+    if (k) return k;
+  }
+  return null;
 }
 function num(v, lo, hi, fallback, digits = 0) {
   const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*(px)?\s*$/.test(v) ? parseFloat(v) : NaN;
@@ -59,11 +67,21 @@ function num(v, lo, hi, fallback, digits = 0) {
   const f = 10 ** digits;
   return Math.round(Math.min(hi, Math.max(lo, n)) * f) / f;
 }
+const oneOf = (v, list, fallback) => (typeof v === 'string' && list.includes(v.trim().toLowerCase()) ? v.trim().toLowerCase() : fallback);
 // Smallest share of fg (mixed into bg) that still reads at AA on every background in `on`.
 function readable(fg, bg, on, from = 0.5) {
   for (let p = from; p < 1; p += 0.02) { const c = mix(fg, bg, p); if (on.every(b => contrast(c, b) >= 4.6)) return c; }
   return fg;
 }
+// Worst contrast of fg over several backgrounds.
+const worst = (fg, bgs) => Math.min(...bgs.map(b => contrast(fg, b)));
+// Text colour for derived systems: the preferred ink when it reads at AA on every background, otherwise
+// whichever of it, pure white and pure black reads best (one of the last two always reaches 4.58:1).
+function pickText(bgs, preferred) {
+  if (worst(preferred, bgs) >= 4.5) return preferred;
+  return [preferred, '#ffffff', '#000000'].reduce((a, b) => (worst(b, bgs) > worst(a, bgs) ? b : a));
+}
+const surface2Of = (surface, text, dark) => mix(surface, text, dark ? 0.94 : 0.96);
 // Second accent for custom systems: the first of teal, sky, violet, emerald, rose, amber that sits 60-160° away.
 function companion(accent, dark) {
   const list = [5, 0, 4, 2, 3, 1].map(i => HUES[dark ? 'dark' : 'light'][i]);
@@ -72,38 +90,60 @@ function companion(accent, dark) {
 
 function normalizeTokens(ds) {
   const src = ds && typeof ds === 'object' && !Array.isArray(ds) ? ds : {};
-  const c = Object.fromEntries(COLORS.map(k => [k, hex(src[k])]));
+  const given = Object.fromEntries(COLORS.map(k => [k, hex(src[k])]));
+  const c = { ...given };
   // A known preset id merges over that preset; no usable colours at all means the default preset.
-  const named = (typeof src.preset === 'string' && preset(src.preset)) || (COLORS.some(k => c[k]) ? null : preset(DEFAULT_PRESET));
-  c.background ||= (named || preset(DEFAULT_PRESET)).tokens.background;
+  const named = (typeof src.preset === 'string' && preset(src.preset)) || (COLORS.some(k => given[k]) ? null : preset(DEFAULT_PRESET));
+  const LIGHT_BG = preset(DEFAULT_PRESET).tokens.background, DARK_BG = preset('midnight').tokens.background;
+  if (!c.background) {
+    // Default background: the preset's, unless supplied text or surface colours only read on the opposite mode
+    // ({ text: '#f5f5f5' } or { surface: '#1e1e1e' } alone mean a dark system).
+    const pb = (named || preset(DEFAULT_PRESET)).tokens.background, alt = isDark(pb) ? LIGHT_BG : DARK_BG;
+    const fits = b => (!c.text || contrast(c.text, b) >= 4.5) && (!c.surface || isDark(c.surface) === isDark(b));
+    const list = [pb, alt, '#ffffff', '#000000'];
+    c.background = list.find(fits) || (c.text ? list.reduce((a, b) => (contrast(c.text, b) > contrast(c.text, a) ? b : a)) : pb);
+  }
   const dark = isDark(c.background);
-  const base = (named || preset(dark ? 'midnight' : DEFAULT_PRESET)).tokens, struct = (named || preset(DEFAULT_PRESET)).tokens;
-  if (named) for (const k of COLORS) c[k] ||= base[k];
-  else {
-    // Legacy 0.2 or custom systems: derive what is missing from the colours that were given.
-    c.text ||= base.text;
-    c.accent ||= base.accent;
-    c.surface ||= dark ? mix(c.text, c.background, 0.06) : '#ffffff';
-    c.muted ||= readable(c.text, c.background, [c.background, c.surface]);
+  // A preset's neutrals only apply while they still read on the background; a supplied background that flips
+  // the mode ({ preset: 'neutral', background: '#0b0d12' }) re-derives text, surface, muted, border and status.
+  const keep = named && isDark(named.tokens.background) === dark && contrast(named.tokens.text, c.background) >= 4.5;
+  if (keep) {
+    for (const k of COLORS) c[k] ||= named.tokens[k];
+    // The preset's muted grey was tuned for its own background: re-derive it when a supplied background breaks it.
+    if (!given.muted && worst(c.muted, [c.background, c.surface, surface2Of(c.surface, c.text, dark)]) < 4.5)
+      c.muted = readable(c.text, c.background, [c.background, c.surface, surface2Of(c.surface, c.text, dark)]);
+  } else {
+    // Legacy 0.2, custom or mode-flipped systems: derive what is missing from the colours that were given.
+    const base = preset(dark ? 'midnight' : DEFAULT_PRESET).tokens;
+    c.accent ||= named ? named.tokens.accent : base.accent;
+    c.surface ||= dark ? mix(c.text || base.text, c.background, 0.06) : '#ffffff';
+    c.text ||= pickText([c.background, c.surface], base.text);
+    // A derived elevated surface must keep the text readable; fall back to a flat surface (cards keep their border).
+    // With only the background to satisfy, pure white or black always reaches AA.
+    if (!given.surface && worst(c.text, [c.background, c.surface]) < 4.5 && contrast(c.text, c.background) >= contrast(c.text, c.surface)) c.surface = c.background;
+    if (!given.text && !given.surface && worst(c.text, [c.background, c.surface]) < 4.5) { c.surface = c.background; c.text = pickText([c.background], base.text); }
+    c.muted ||= readable(c.text, c.background, [c.background, c.surface, surface2Of(c.surface, c.text, dark)]);
     c.border ||= mix(c.text, c.surface, dark ? 0.16 : 0.12);
-    c.accent2 ||= companion(c.accent, dark);
+    c.accent2 ||= named ? named.tokens.accent2 : companion(c.accent, dark);
     for (const k of ['success', 'warning', 'danger']) c[k] ||= STATUS[dark ? 'dark' : 'light'][k];
   }
+  const fonts = (named || preset(DEFAULT_PRESET)).tokens, struct = fonts;
   const legacy = fontKey(src.font);
-  const bodyFont = fontKey(src.bodyFont) || legacy || base.bodyFont;
+  const bodyFont = fontKey(src.bodyFont) || legacy || fonts.bodyFont;
   // An explicitly chosen preset keeps its heading face; legacy single-font systems use their font throughout.
-  const headingFont = fontKey(src.headingFont) || (named && named.id === src.preset ? base.headingFont : legacy || bodyFont);
-  const name = typeof src.name === 'string' ? src.name.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, 80) : '';
+  const headingFont = fontKey(src.headingFont) || (named && named.id === src.preset ? fonts.headingFont : legacy || bodyFont);
+  // Names reach HTML, JSON and file names: drop control, bidi-override and line-separator characters and angle brackets.
+  const name = typeof src.name === 'string' ? src.name.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069<>]/g, '').trim().slice(0, 80).trim() : '';
   return {
     name: name || (named ? named.name : 'Custom'),
     preset: named ? named.id : 'custom',
     accent: c.accent, accent2: c.accent2, background: c.background, surface: c.surface, text: c.text, muted: c.muted, border: c.border,
     success: c.success, warning: c.warning, danger: c.danger,
-    headingFont, bodyFont, monoFont: fontKey(src.monoFont) || base.monoFont, font: bodyFont,
+    headingFont, bodyFont, monoFont: fontKey(src.monoFont) || fonts.monoFont, font: bodyFont,
     radius: num(src.radius, 0, 40, struct.radius),
     spacing: num(src.spacing, 4, 24, struct.spacing),
-    density: ENUM.density.includes(src.density) ? src.density : struct.density,
-    shadow: ENUM.shadow.includes(src.shadow) ? src.shadow : struct.shadow,
+    density: oneOf(src.density, ENUM.density, struct.density),
+    shadow: oneOf(src.shadow, ENUM.shadow, struct.shadow),
     typeScale: num(src.typeScale, 1.1, 1.5, struct.typeScale, 3),
   };
 }
@@ -113,25 +153,37 @@ function normalizeTokens(ds) {
 function derive(input) {
   const t = normalizeTokens(input), dark = isDark(t.background);
   const ink = [t.text, t.background].find(c => luminance(c) < 0.05) || '#0b0b0f';
-  const on = c => (contrast('#ffffff', c) >= 4.5 || contrast('#ffffff', c) >= contrast(ink, c) ? '#ffffff' : ink);
+  // Text on a filled colour: white, else the system's own dark ink, else pure black. Below white's 4.5:1 the
+  // fill's luminance is above 0.18, where black always reaches 4.6:1, so the result is always AA.
+  const on = c => ['#ffffff', ink].find(x => contrast(x, c) >= 4.5) || '#000000';
   const v = (name, a, p, b) => ({ css: `color-mix(in oklab,var(${a}) ${p}%,${b.startsWith('#') ? b : `var(${b})`})`, hex: mix(t[name] || name, b.startsWith('#') ? b : t[b.slice(2)], p / 100) });
   const strongPct = (c, bgs) => { for (let p = 100; p > 0; p -= 5) if (bgs.every(b => contrast(mix(c, t.text, p / 100), b) >= 4.5)) return p; return 0; };
-  const surface2 = v('surface', '--surface', dark ? 94 : 96, '--text');
+  // Subtle fills (surface-2, tone tints) start at their design strength and back off toward the surface until
+  // text and muted text still read on them; presets never need to back off, low-contrast custom systems do.
+  const tint = (c, pct, inks) => { for (let p = pct; p > 0; p -= 1) { const h = mix(c, t.surface, p / 100); if (inks.every(i => contrast(i, h) >= 4.5 || contrast(i, t.surface) < 4.5)) return p; } return 0; };
+  const s2pct = 100 - tint(t.text, dark ? 6 : 4, [t.text, t.muted]);
+  const surface2 = v('surface', '--surface', s2pct, '--text');
   const out = { tokens: t, dark, onAccent: on(t.accent), onDanger: on(t.danger), surface2,
     borderStrong: v('border', '--border', dark ? 78 : 82, '--text') };
   out.accentHover = v('accent', '--accent', 86, out.onAccent === '#ffffff' ? '#000000' : '#ffffff');
   out.dangerHover = v('danger', '--danger', 86, out.onDanger === '#ffffff' ? '#000000' : '#ffffff');
   const info = STATUS[dark ? 'dark' : 'light'].info;
   out.tones = {};
+  // Light warning tints lean on a fixed amber so "warning" never reads as a pale "danger" (orange-browns tint to peach).
+  const AMBER = '#facc15';
   for (const [tone, color, softPct] of [['accent', t.accent, dark ? 18 : 10], ['success', t.success], ['warning', t.warning], ['danger', t.danger], ['info', info]]) {
-    const pct = softPct || (dark ? 16 : 11);
-    const soft = mix(color, t.surface, pct / 100);
+    const ref = `var(--${tone})`, amber = tone === 'warning' && !dark;
+    const tintOf = amber ? mix(color, AMBER, 0.25) : color, tintRef = amber ? `color-mix(in oklab,${ref} 25%,${AMBER})` : ref;
+    const pct = tint(tintOf, amber ? 18 : softPct || (dark ? 16 : 11), [t.text]);
+    const soft = mix(tintOf, t.surface, pct / 100);
     const sp = strongPct(color, [soft, t.surface, t.background, surface2.hex]);
-    const ref = `var(--${tone})`;
-    out.tones[tone] = { color, soft: { css: `color-mix(in oklab,${ref} ${pct}%,var(--surface))`, hex: soft }, strong: { css: `color-mix(in oklab,${ref} ${sp}%,var(--text))`, hex: mix(color, t.text, sp / 100) } };
+    out.tones[tone] = { color, soft: { css: `color-mix(in oklab,${tintRef} ${pct}%,var(--surface))`, hex: soft }, strong: { css: `color-mix(in oklab,${ref} ${sp}%,var(--text))`, hex: mix(color, t.text, sp / 100) } };
   }
-  // Charts: accent, accent-2, then the candidates whose hues sit furthest from those already chosen.
-  const chosen = [t.accent, t.accent2], pool = [...HUES[dark ? 'dark' : 'light']];
+  // Charts: accent, accent-2 (unless it is nearly the accent), then the candidates whose hues sit furthest
+  // from those already chosen.
+  const chosen = [t.accent], pool = [...HUES[dark ? 'dark' : 'light']];
+  if (!near(t.accent2, t.accent)) chosen.push(t.accent2);
+  const fixed = chosen.length;
   while (chosen.length < 6) {
     const hued = chosen.filter(c => chroma(c) >= 0.04);
     const score = c => (hued.length ? Math.min(...hued.map(h => hueGap(c, h))) : 180);
@@ -140,7 +192,10 @@ function derive(input) {
   }
   // Calm systems (earthy or ink accents) get calmer chart hues: blend extra colours toward muted.
   const target = (chroma(t.accent) + chroma(t.accent2)) / 2;
-  out.chart = chosen.map((c, i) => { const k = i < 2 ? 0 : Math.min(0.5, Math.max(0, 1 - target / chroma(c))); return k > 0.05 ? mix(c, t.muted, 1 - k) : c; });
+  // Marks must stay visible on the surface (WCAG 1.4.11, 3:1): pale colours are deepened toward black (or white).
+  const deep = contrast('#000000', t.surface) >= contrast('#ffffff', t.surface) ? '#000000' : '#ffffff';
+  const visible = c => { for (let p = 1; p > 0; p -= 0.05) { const m = mix(c, deep, p); if (contrast(m, t.surface) >= 3) return m; } return deep; };
+  out.chart = chosen.map((c, i) => { const k = i < fixed ? 0 : Math.min(0.5, Math.max(0, 1 - target / chroma(c))); return visible(k > 0.05 ? mix(c, t.muted, 1 - k) : c); });
   return out;
 }
 
@@ -293,9 +348,9 @@ const KIT_EXAMPLE = `<div class="app-shell">
     </div>
     <div id="notice" class="alert alert-info" role="status" hidden><i data-icon="info"></i><div><p class="alert-title">Maintenance window</p><p>Ticket sync pauses Saturday 22:00–23:00.</p></div></div>
     <div id="week" data-panel="period" class="stack gap-6">
-      <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-label="Key figures">
+      <section class="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4" aria-label="Key figures">
         <div class="stat"><p class="stat-label"><i data-icon="inbox"></i>Open requests</p><p class="stat-value">48</p><p class="stat-delta is-positive"><i data-icon="trending-down"></i>6 fewer than last week</p></div>
-        <div class="stat"><p class="stat-label"><i data-icon="timer"></i>Median first reply</p><p class="stat-value">1h 12m</p><p class="stat-delta is-positive"><i data-icon="trending-up"></i>18 min faster</p></div>
+        <div class="stat"><p class="stat-label"><i data-icon="timer"></i>First reply</p><p class="stat-value">1h 12m</p><p class="stat-delta is-positive"><i data-icon="trending-up"></i>18 min faster</p></div>
         <div class="stat"><p class="stat-label"><i data-icon="circle-check"></i>Resolved</p><p class="stat-value">131</p><p class="stat-delta">Same as last week</p></div>
         <div class="stat"><p class="stat-label"><i data-icon="triangle-alert"></i>Breaching SLA</p><p class="stat-value">3</p><p class="stat-delta is-negative">Needs attention</p></div>
       </section>

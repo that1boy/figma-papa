@@ -2,13 +2,46 @@
 const { slideLayout } = require('./slide-layout.cjs');
 const { webScreens } = require('./schema.cjs');
 const { INTERACTIONS, inspectorScript } = require('./design-runtime.cjs');
+const { normalizeTokens, kitCSS } = require('./kit.cjs');
+const { utilityCSS, collectClasses } = require('./utilities.cjs');
+const { expandMarkup, MARKUP_CSS } = require('./markup.cjs');
 const escape = (s) =>
   String(s ?? '').replace(
     /[&<>"']/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
   );
 const CSP =
-  "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; font-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+  "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; font-src data:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+const REFERENCE = /\{\{reference:([0-5])\}\}/g;
+// 0.2 base rules kept as zero-specificity fallbacks. They load before the kit, so kit
+// components (which are also :where()) and every utility or model rule win over them.
+const BASE_CSS = ':where(button,a){touch-action:manipulation}:where(:focus-visible){outline:3px solid var(--accent);outline-offset:3px}:where([data-forma-screen]){min-height:100vh}:where(dialog){max-width:min(90vw,640px);max-height:85vh;overflow:auto}:where(dialog)::backdrop{background:#10182866}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}';
+// Tweaks become custom properties; re-checked here because the result is written into <style>.
+const TWEAK_VAR = /^--[a-z][a-z0-9-]{1,40}$/, TWEAK_UNITS = ['px', 'rem', 'em', '%', 'vh', 'vw', ''];
+function tweakCSS(a, selector = ':root') {
+  const out = [];
+  for (const t of (Array.isArray(a?.tweaks) ? a.tweaks : []).slice(0, 8)) {
+    const unit = t?.unit ?? 'px', v = Math.round(Number(t?.value) * 1e4) / 1e4;
+    if (t && typeof t.var === 'string' && TWEAK_VAR.test(t.var) && TWEAK_UNITS.includes(unit) && Number.isFinite(v) && Math.abs(v) < 1e6) out.push(`${t.var}:${v}${unit}`);
+  }
+  return out.length ? `${selector}{${out.join(';')}}` : '';
+}
+const designTokens = (a) => normalizeTokens(a.designSystem || a.theme);
+// Web styles in cascade order (spec 9): kit (fonts, tokens, components) -> markup support -> utilities
+// for every class used on any screen -> model CSS -> tweak values. Handoff reuses the same parts.
+function webStyles(a, tweakSelector = ':root') {
+  const tokens = designTokens(a);
+  return { tokens, base: BASE_CSS, kit: kitCSS(tokens), markup: MARKUP_CSS, utilities: utilityCSS(collectClasses(webScreens(a).map((s) => s.html)), tokens), model: a.css || '', tweaks: tweakCSS(a, tweakSelector) };
+}
+const webCSS = (a) => { const s = webStyles(a); return [s.base, s.kit, s.markup, s.utilities, s.model, s.tweaks].filter(Boolean).join('\n'); };
+// Stored screen HTML -> page HTML: references first, then icons and charts. In the editor, images
+// remember their reference number so the inspector can report stored-equivalent markup.
+function screenBody(html, refs, editor) {
+  let out = String(html ?? '');
+  if (editor) out = out.replace(/ src="\{\{reference:([0-5])\}\}"/g, (_, n) => ` src="${refs[Number(n)]?.data || ''}" data-forma-reference="${n}"`);
+  out = out.replace(REFERENCE, (_, n) => refs[Number(n)]?.data || '');
+  try { return expandMarkup(out); } catch { return out; }
+}
 function tableHTML(t) {
   return t
     ? `<table><thead><tr>${t.headers.map((h) => `<th>${escape(h)}</th>`).join('')}</tr></thead><tbody>${t.rows.map((r) => `<tr>${r.map((c) => `<td>${escape(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`
@@ -38,11 +71,8 @@ function pageHTML(a, refs = [], page = null, editor = null) {
   if (a.kind === 'web') {
     const screens = webScreens(a);
     const chosen = page === null ? screens : screens.filter(s => s.id === page);
-    body = chosen.map((s,i) => `<div data-forma-screen="${escape(s.id)}" aria-label="${escape(s.name)}"${i ? ' hidden' : ''}>${s.html}</div>`).join('').replace(/\{\{reference:([01])\}\}/g, (_, n) => refs[Number(n)]?.data || '');
-    const d = a.designSystem || { ...a.theme, surface: '#ffffff', muted: '#667085', font: 'Segoe UI', radius: 12, spacing: 8 };
-    const lum=d.accent.slice(1).match(/../g).map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);
-    const onAccent=(.2126*lum[0]+.7152*lum[1]+.0722*lum[2])>.179?'#111111':'#ffffff';
-    css = `:root{--on-accent:${onAccent};--accent:${d.accent};--background:${d.background};--text:${d.text};--surface:${d.surface};--muted:${d.muted};--radius:${d.radius}px;--space:${d.spacing}px;--font:'${d.font}',sans-serif}*{box-sizing:border-box}body{margin:0;font-family:var(--font);background:var(--background);color:var(--text)}button,input,select,textarea{font:inherit}button,a{touch-action:manipulation}button{cursor:pointer}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}[data-forma-screen]{min-height:100vh}dialog{max-width:min(90vw,640px);max-height:85vh;overflow:auto}dialog::backdrop{background:#10182866}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}\n` + a.css;
+    body = chosen.map((s,i) => `<div data-forma-screen="${escape(s.id)}" aria-label="${escape(s.name)}"${i ? ' hidden' : ''}>${screenBody(s.html, refs, editor)}</div>`).join('');
+    css = webCSS(a);
   } else {
     css = `*{box-sizing:border-box}body{margin:0;background:#eeedf1;color:${a.theme.text};font-family:Arial,sans-serif}h1,h2,p{margin-top:0}h1{font-size:42px;line-height:1.15;letter-spacing:-1px}h2{font-size:24px}p,li{font-size:20px;line-height:1.55}li{margin-bottom:14px}ul{padding-left:25px}table{width:100%;border-collapse:collapse;font-size:17px;text-align:left}th{background:${a.theme.accent};color:white}td,th{padding:14px;border-bottom:1px solid #dedde3}figure{margin:0}img{max-width:100%;max-height:360px;object-fit:contain}figcaption{font-size:13px;color:#777}.slide{width:1200px;height:675px;background:${a.theme.background};padding:55px 65px;margin:24px auto;position:relative;overflow:hidden}.slide.cover{display:flex;flex-direction:column;justify-content:center}.slide.cover h1{font-size:62px;max-width:900px}.slide .kicker{color:${a.theme.accent};font-size:13px;text-transform:uppercase;letter-spacing:2px;margin-bottom:18px}.slide .subtitle{color:#737180;font-size:24px;max-width:850px}.slide .number{position:absolute;bottom:22px;left:65px;font-size:12px;color:#888}.columns{display:grid;grid-template-columns:1fr 1fr;gap:60px}.columns h2{color:${a.theme.accent}}.image-layout{display:grid;grid-template-columns:1fr 1fr;gap:40px}.document{max-width:850px;margin:30px auto;background:white;padding:75px 80px;min-height:1100px}.document h1{font-size:36px;color:#111}.document h2{font-size:21px;margin-top:30px}.document p,.document li{font-size:16px;line-height:1.65}.document table{font-size:14px}.document .subtitle{color:#666;font-size:17px;margin-bottom:35px}@media print{body{background:white}.slide{margin:0;page-break-after:always}.document{margin:0;padding:0;min-height:0;max-width:none}h2{break-after:avoid}tr,figure{break-inside:avoid}}`;
     if (a.kind === 'slides') {
@@ -79,7 +109,7 @@ function pageHTML(a, refs = [], page = null, editor = null) {
 function warnings(a, refs) {
   const w = [];
   if (a.kind === 'web')
-    for (const m of webScreens(a).map(s => s.html).join('\n').matchAll(/\{\{reference:([01])\}\}/g))
+    for (const m of webScreens(a).map(s => s.html).join('\n').matchAll(REFERENCE))
       if (!refs[Number(m[1])]) w.push('A referenced image is missing.');
   if (a.kind === 'slides')
     for (const [i, s] of a.slides.entries()) {
@@ -93,4 +123,4 @@ function warnings(a, refs) {
       if (b.imageIndex != null && !refs[b.imageIndex]) w.push('A document image is missing.');
   return [...new Set(w)];
 }
-module.exports = { pageHTML, escape, CSP, warnings, INTERACTIONS };
+module.exports = { pageHTML, escape, CSP, warnings, INTERACTIONS, webStyles, webCSS, tweakCSS, designTokens };

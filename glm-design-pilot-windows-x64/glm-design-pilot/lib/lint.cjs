@@ -21,6 +21,7 @@ const optional = (file, pick) => { try { return pick(require(file)) ?? null; } c
 const dep = (deps, key, file, pick) => (Object.prototype.hasOwnProperty.call(deps, key) ? deps[key] : optional(file, pick));
 const placeholderCopy = (s) => (typeof s === 'string' && (PLACEHOLDER_I.test(s) || PLACEHOLDER.test(s)) ? s : '');
 const cssClasses = (css) => new Set([...String(css || '').matchAll(/\.(-?[A-Za-z_][\w-]*)/g)].map((m) => m[1]));
+const MAX_SCREEN_HTML = 200000;
 const KIT_FILE = path.join(__dirname, '..', 'assets', 'kit', 'forma-kit.css');
 let kitCache = { mtime: -1, classes: new Set() };
 function kitClasses() {
@@ -61,10 +62,17 @@ function builtinChart(spec) {
   }
   return '';
 }
-function chartProblem(raw, validate) {
-  if (raw.length > 6000) return `data-chart is ${raw.length} characters; the limit is 6000`;
-  let spec;
-  try { spec = JSON.parse(raw); } catch { return 'data-chart is not valid JSON'; }
+const json = (v) => { try { return JSON.stringify(v) || ''; } catch { return ''; } };
+// Validator messages are sentences; callers wrap them in their own sentence.
+const sentence = (s) => oneLine(s).replace(/[\s.]+$/, '');
+function chartProblem(raw, validate) { const p = chartCheck(raw, validate); return p && sentence(p); }
+// raw: the data-chart attribute string, or a slide's chart object.
+function chartCheck(raw, validate) {
+  let spec = raw;
+  if (typeof raw === 'string') {
+    if (raw.length > 6000) return `data-chart is ${raw.length} characters; the limit is 6000`;
+    try { spec = JSON.parse(raw); } catch { return 'data-chart is not valid JSON'; }
+  } else if (json(raw).length > 6000) return 'the chart spec is over 6000 characters';
   if (typeof validate === 'function') {
     try {
       const r = validate(spec);
@@ -83,7 +91,7 @@ function parseHTML(html) {
 }
 const attr = (n, k) => (n && n.attribs && typeof n.attribs[k] === 'string' ? n.attribs[k] : null);
 // Flags inherited from ancestors (computed once, so deep nesting stays linear).
-const HIDDEN = 1, IN_LABEL = 2, IN_FORM = 4;
+const HIDDEN = 1, IN_LABEL = 2, IN_FORM = 4, IN_ACTION = 8;
 const hides = (n) => attr(n, 'hidden') != null || n.name === 'dialog' || n.name === 'template';
 function walk(doc) {
   const els = [], texts = [], flags = new Map(), stack = [];
@@ -93,7 +101,7 @@ function walk(doc) {
     if (n.type === 'text') { texts.push(n); flags.set(n, up); continue; }
     if (n.type !== 'tag') continue;
     els.push(n); flags.set(n, up);
-    const own = up | (hides(n) ? HIDDEN : 0) | (n.name === 'label' ? IN_LABEL : 0) | (n.name === 'form' ? IN_FORM : 0);
+    const own = up | (hides(n) ? HIDDEN : 0) | (n.name === 'label' ? IN_LABEL : 0) | (n.name === 'form' ? IN_FORM : 0) | (attr(n, 'data-action') != null ? IN_ACTION : 0);
     for (let i = (n.children || []).length - 1; i >= 0; i--) stack.push([n.children[i], own]);
   }
   return { els, texts, flags };
@@ -130,15 +138,17 @@ function capper(out, cap) {
 function webLint(a, deps) {
   const out = [], push = capper(out, 10);
   const raw = Array.isArray(a.screens) && a.screens.length ? a.screens : [{ id: 'home', name: 'Home', html: a.html }];
-  const screens = raw.filter((s) => s && typeof s === 'object').slice(0, 60).map((s, i) => ({ id: typeof s.id === 'string' && s.id ? s.id.slice(0, 200) : `screen-${i + 1}`, name: txt(s.name) || txt(s.id) || `Screen ${i + 1}`, html: typeof s.html === 'string' ? s.html.slice(0, 1000000) : '' }));
-  const screenIds = screens.map((s) => s.id), screenSet = new Set(screenIds), idList = screenIds.slice(0, 8).map((id) => snip(id, 40)).join(', ');
+  const screens = raw.filter((s) => s && typeof s === 'object').slice(0, 60).map((s, i) => ({ id: typeof s.id === 'string' && s.id ? s.id.slice(0, 200) : `screen-${i + 1}`, name: txt(s.name) || txt(s.id) || `Screen ${i + 1}`, html: typeof s.html === 'string' ? s.html.slice(0, MAX_SCREEN_HTML) : '' }));
+  const screenIds = screens.map((s) => s.id), screenSet = new Set(screenIds), idList = [...screenSet].slice(0, 8).map((id) => snip(id, 40)).join(', ');
+  for (const id of screenSet) { const n = screenIds.filter((x) => x === id).length; if (n > 1) push('duplicate-screen', 'error', id, 'screen', `Screen id "${snip(id, 40)}" is used by ${n} screens; navigation always opens the first. Give every screen a unique id.`); }
   let names = null, resolve = null;
   try { const f = dep(deps, 'iconNames', './icons.cjs', (m) => m.iconNames); if (typeof f === 'function') { names = new Set([...f()].map(String)); if (!names.size) names = null; } } catch { names = null; }
   try { const f = dep(deps, 'resolveIcon', './icons.cjs', (m) => m.resolveIcon); if (typeof f === 'function') resolve = f; } catch {}
   const aliases = dep(deps, 'iconAliases', './icons.cjs', (m) => m.ICON_ALIASES), fallback = dep(deps, 'fallbackIcon', './icons.cjs', (m) => m.FALLBACK_ICON);
   const classify = dep(deps, 'classifyClasses', './utilities.cjs', (m) => m.classifyClasses);
   const validate = dep(deps, 'validateChart', './charts.cjs', (m) => m.validateChart);
-  const defined = new Set([...(deps.kitClasses ? [...deps.kitClasses] : kitClasses()), ...cssClasses(a.css)]);
+  const kit = Object.prototype.hasOwnProperty.call(deps, 'kitClasses') ? deps.kitClasses : kitClasses();
+  const defined = new Set([...(kit && typeof kit[Symbol.iterator] === 'function' && typeof kit !== 'string' ? [...kit].map(String) : []), ...cssClasses(a.css)]);
   const knownIcon = (n, raw) => {
     if (names.has(n)) return true;
     try { if (aliases && names.has(String(aliases instanceof Map ? aliases.get(n) : Object.prototype.hasOwnProperty.call(aliases, n) ? aliases[n] : ''))) return true; } catch {}
@@ -155,7 +165,8 @@ function webLint(a, deps) {
     const ids = new Map(), byId = new Map();
     for (const n of els) { const id = attr(n, 'id'); if (id) { ids.set(id, (ids.get(id) || 0) + 1); if (!byId.has(id)) byId.set(id, n); } }
     for (const [id, count] of ids) if (count > 1) F('duplicate-id', 'error', `#${snip(id, 40)}`, `id "${snip(id, 40)}" is used ${count} times on this screen; ids must be unique (targets and labels pick the first).`);
-    const targets = new Set(); edges.set(s.id, targets);
+    let targets = edges.get(s.id);
+    if (!targets) edges.set(s.id, (targets = new Set()));
     let dead = 0, inert = 0;
     const opens = new Set(els.filter((n) => attr(n, 'data-action') === 'open').map((n) => attr(n, 'data-target')));
     const labelFor = new Set(els.filter((n) => n.name === 'label').map((n) => attr(n, 'for')).filter(Boolean));
@@ -179,14 +190,14 @@ function webLint(a, deps) {
       if (n.name === 'a' && action == null) {
         const href = attr(n, 'href');
         const nav = /^#screen=(.+)$/.exec(href || '');
-        if (href === '#' || href === '') dead++;
+        if (href === '#' || href === '') { if (!(flags.get(n) & IN_ACTION)) dead++; }
         else if (nav) { if (screenSet.has(nav[1])) targets.add(nav[1]); else F('nav-target', 'error', here, `Link to screen "${snip(nav[1], 40)}" goes nowhere. Use one of: ${idList}.`); }
         else if (href && href.startsWith('#')) {
           const id = href.slice(1);
           if (!ids.has(id)) F('link-target', 'warning', here, screenSet.has(id) ? `Link href="#${snip(id, 40)}" does not switch screens; use data-action="navigate" data-target="${snip(id, 40)}".` : `Link target #${snip(id, 40)} does not exist on this screen.`);
         }
       }
-      if (n.name === 'button' && action == null && attr(n, 'type') !== 'submit' && !(flags.get(n) & IN_FORM) && attr(n, 'disabled') == null) inert++;
+      if (n.name === 'button' && action == null && !(flags.get(n) & (IN_FORM | IN_ACTION)) && attr(n, 'disabled') == null) inert++;
       for (const k of ['aria-labelledby', 'aria-describedby', 'aria-controls'])
         for (const id of (attr(n, k) || '').split(/\s+/).filter(Boolean)) if (!ids.has(id)) F('aria-ref', 'warning', here, `${k} references #${snip(id, 40)}, which does not exist on this screen.`);
       if (n.name === 'label' && attr(n, 'for') && !ids.has(attr(n, 'for'))) F('aria-ref', 'warning', here, `label for="${snip(attr(n, 'for'), 40)}" points to a missing id.`);
@@ -276,7 +287,7 @@ function slidesLint(a, deps) {
     cols.forEach((c, k) => { const n = txt(c.body).length + list(c.bullets).join('').length; if (n > 400) F('slide-dense', 'warning', `columns[${k}]`, `${label} column ${k + 1} carries ${n} characters; keep each column under 400.`); });
     const rows = tableLint(s.table, F, label, 100, 'table');
     if (rows > 6) F('slide-dense', 'warning', 'table', `${label} table has ${rows} rows; slides fit about 6. Split it or show the top rows.`);
-    if (s.chart) { const p = chartProblem(typeof s.chart === 'string' ? s.chart : JSON.stringify(s.chart) || '', dep(deps, 'validateChart', './charts.cjs', (m) => m.validateChart)); if (p) F('chart-invalid', 'error', 'chart', `${label} chart is invalid: ${snip(p, 200)}.`); }
+    if (s.chart) { const p = chartProblem(s.chart, dep(deps, 'validateChart', './charts.cjs', (m) => m.validateChart)); if (p) F('chart-invalid', 'error', 'chart', `${label} chart is invalid: ${snip(p, 200)}.`); }
     const key = title.toLowerCase();
     if (key && titles.has(key)) F('slide-duplicate-title', 'info', 'title', `${label} repeats the title of slide ${titles.get(key)}; make each title state its own point.`);
     else if (key) titles.set(key, i + 1);
@@ -312,7 +323,8 @@ function documentLint(a) {
   return out;
 }
 function sortFindings(list) {
-  return list.map((f, i) => [f, i]).sort((x, y) => SEV[x[0].severity] - SEV[y[0].severity] || x[1] - y[1]).map((x) => x[0]);
+  const rank = (f) => (f && Object.prototype.hasOwnProperty.call(SEV, f.severity) ? SEV[f.severity] : 3);
+  return (Array.isArray(list) ? list : []).map((f, i) => [f, i]).sort((x, y) => rank(x[0]) - rank(y[0]) || x[1] - y[1]).map((x) => x[0]);
 }
 // staticLint(artifact, deps?) — deps lets callers (and tests) inject or disable
 // (null) iconNames, resolveIcon, iconAliases, fallbackIcon, classifyClasses, validateChart, kitClasses.
@@ -329,14 +341,17 @@ function staticLint(artifact, deps = {}) {
 // Runs inside the page via page.evaluate(PAGE_LINT, { viewport, screen }). It must stay
 // self-contained: Playwright serialises only this function's source.
 function PAGE_LINT(opts) {
-  opts = opts || {};
+  // The spec form page.evaluate(PAGE_LINT_FN, viewport) passes the viewport label alone.
+  opts = typeof opts === 'string' ? { viewport: opts } : opts && typeof opts === 'object' ? opts : {};
   const D = document, html = D.documentElement, body = D.body, vw = innerWidth, vh = innerHeight;
   const root = D.querySelector('[data-forma-screen]:not([hidden])') || body;
   const screen = opts.screen != null ? String(opts.screen) : root.getAttribute('data-forma-screen');
   const viewport = opts.viewport != null ? String(opts.viewport) : vw + 'px';
   const mobile = typeof opts.mobile === 'boolean' ? opts.mobile : vw < 640;
   const cap = opts.cap > 0 ? opts.cap : 12, max = opts.max > 0 ? opts.max : 150;
-  const sx = scrollX, sy = scrollY, out = [], seen = new Map(), counts = {}, extra = {};
+  // Time budget (ms): hostile pages stop the remaining work instead of stalling the renderer.
+  const t0 = performance.now(), budget = opts.budget > 0 ? +opts.budget : 1500, late = () => performance.now() - t0 > budget, skipped = [];
+  const sx = scrollX, sy = scrollY, out = [], seen = new Map(), counts = {}, extra = {}, omitted = new Map();
   const styles = new Map(), infos = new Map(), colors = new Map();
   const st = (n) => { let s = styles.get(n); if (!s) { s = getComputedStyle(n); styles.set(n, s); } return s; };
   const clean = (s) => String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -361,10 +376,16 @@ function PAGE_LINT(opts) {
   // One finding per rule and element (or string target), at most `cap` per rule. The cap is
   // checked first and message may be a thunk, so pathological pages cost little.
   const add = (rule, severity, el, message) => {
-    if ((counts[rule] || 0) >= cap) { extra[rule] = (extra[rule] || 0) + 1; return null; }
     let done = seen.get(rule);
     if (!done) seen.set(rule, (done = new Set()));
     if (done.has(el)) return null;
+    if ((counts[rule] || 0) >= cap) {
+      // Count each omitted element once (pair rules such as text-overlap call this per pair).
+      let o = omitted.get(rule);
+      if (!o) omitted.set(rule, (o = new Set()));
+      if (!o.has(el)) { o.add(el); extra[rule] = (extra[rule] || 0) + 1; }
+      return null;
+    }
     done.add(el); counts[rule] = (counts[rule] || 0) + 1;
     const f = { rule, severity, screen, viewport, target: typeof el === 'string' ? el : where(el), message: typeof message === 'function' ? message() : message };
     out.push(f); return f;
@@ -372,7 +393,7 @@ function PAGE_LINT(opts) {
   const upto = (list, n) => Array.prototype.slice.call(list, 0, n);
   // Colours: computed values may be rgb(), oklab(), oklch() or color(); anything that is
   // not rgb() is resolved by painting one canvas pixel.
-  let ctx = null;
+  let ctx = null, forced = null, adopted = null;
   const rgba = (s) => {
     if (colors.has(s)) return colors.get(s);
     let v = null; const m = /^rgba?\(([^)]*)\)$/.exec(s);
@@ -435,13 +456,15 @@ function PAGE_LINT(opts) {
   try {
     // 1. Text: collect visible text nodes per parent element.
     const owners = new Map(), range = D.createRange();
-    const tw = D.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const SKIP = 'script,style,noscript,template,textarea,select,option,svg,[data-forma-runtime],[data-forma-expanded]';
-    let tn, n = 0;
+    // Skipped subtrees are rejected whole, so thousands of chart or icon nodes cost nothing.
+    const tw = D.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, { acceptNode: (x) => (x.nodeType !== 1 ? NodeFilter.FILTER_ACCEPT : x.matches(SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP) });
+    let tn, n = 0, walked = 0;
     while ((tn = tw.nextNode()) && n < 5000) {
+      if ((++walked & 1023) === 0 && late()) { skipped.push('text'); break; }
       if (!/\S/.test(tn.data)) continue;
       const el = tn.parentElement;
-      if (!el || el.closest(SKIP)) continue;
+      if (!el) continue;
       n++;
       range.selectNodeContents(tn);
       const rects = [...range.getClientRects()].filter((r) => r.width > 0.5 && r.height > 0.5);
@@ -474,7 +497,7 @@ function PAGE_LINT(opts) {
     for (const o of visible) { const b = o.el.closest('p,li,dd,blockquote,figcaption'); if (b && root.contains(b)) blocks.add(b); else if (/^(block|list-item)$/.test(o.s.display)) blocks.add(o.el); }
     let checked = 0;
     for (const b of blocks) {
-      if (++checked > 300) break;
+      if (++checked > 300 || ((checked & 31) === 0 && late())) { if (checked <= 300) skipped.push('line length'); break; }
       if (b.getElementsByTagName('*').length > 60) continue;
       const t = clean(b.textContent);
       if (t.length <= 90 || t.length > 6000 || !shown(b)) continue;
@@ -500,7 +523,7 @@ function PAGE_LINT(opts) {
     outer: for (let a = 0; a < frags.length; a++) {
       const A = frags[a];
       for (let k = a + 1; k < frags.length && frags[k].t < A.b; k++) {
-        if (++ops > 60000) break outer;
+        if (++ops > 60000 || ((ops & 4095) === 0 && late())) { if (ops <= 60000) skipped.push('overlap'); break outer; }
         const B = frags[k];
         if (A.o === B.o || A.o.el.contains(B.o.el) || B.o.el.contains(A.o.el)) continue;
         const w = Math.min(A.r, B.r) - Math.max(A.l, B.l), h = Math.min(A.b, B.b) - Math.max(A.t, B.t);
@@ -512,7 +535,9 @@ function PAGE_LINT(opts) {
     // 4. Tap targets at mobile widths.
     if (mobile) {
       const sel = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=switch],[role=menuitem],[data-action],[tabindex]:not([tabindex="-1"])';
+      let tapped = 0;
       for (const el of upto(root.querySelectorAll(sel), 1500)) {
+        if ((++tapped & 127) === 0 && late()) { skipped.push('tap targets'); break; }
         if (el.closest('[data-forma-runtime]') || el.matches(':disabled') || !shown(el)) continue;
         const b = el.getBoundingClientRect();
         if (b.right <= 0 || b.left >= vw) continue;
@@ -526,25 +551,37 @@ function PAGE_LINT(opts) {
         add('tap-target', m < 24 ? 'error' : 'warning', el, () => { const nm = snip(accName(el), 24); return kind(el) + (nm ? ' "' + nm + '"' : '') + ' is ' + Math.round(w) + '×' + Math.round(h) + 'px; make tap targets at least 44×44px on mobile (never under 24px), e.g. min-h-11 with padding.'; });
       }
     }
-    // 5. Horizontal overflow and the elements causing it.
+    // 5. Horizontal overflow and the elements causing it. past(r) = how far a box reaches beyond
+    // the scroll origin's far edge in document coordinates (the left edge in right-to-left pages).
     const sw = Math.max(html.scrollWidth, body.scrollWidth);
     if (sw > vw + 2) {
+      const rtl = st(body).direction === 'rtl', past = (r) => (rtl ? -(r.left + sx) : r.right + sx - vw);
       const clippedBy = (el) => { for (let p = el.parentElement; p && p !== body && p !== html; p = p.parentElement) { const s = st(p); if (!NOCLIP.test(s.display) && s.overflowX !== 'visible') return true; } return false; };
       const all = root.querySelectorAll('*'); let found = 0;
       for (let k = 0; k < all.length && k < 6000 && found < 6; k++) {
+        if ((k & 255) === 255 && late()) { skipped.push('overflow'); break; }
         const el = all[k];
         if (el.closest('[data-forma-runtime]')) continue;
         const b = el.getBoundingClientRect();
         if (b.width === 0 && b.height === 0) continue;
         const p = el.parentElement, pb = p && p !== root && p !== body ? p.getBoundingClientRect() : null;
         const table = el.closest('table') ? ' Wrap wide tables in a div with overflow-x-auto.' : '';
-        if (b.right > vw + 1) {
-          if ((pb && pb.right > vw + 1) || clippedBy(el) || st(el).position === 'fixed') continue;
+        if (past(b) > 1) {
+          if ((pb && past(pb) > 1) || clippedBy(el) || st(el).position === 'fixed') continue;
           found++;
-          add('overflow', 'error', el, 'Extends ' + Math.round(b.right - vw) + 'px past the ' + vw + 'px viewport and causes horizontal scrolling. Constrain it (w-full, max-w-full, min-w-0, flex-wrap) or stack columns at this width.' + table);
-        } else if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth > 0 && b.left + el.scrollWidth > vw + 1 && st(el).overflowX === 'visible' && ![...el.children].some((c) => c.getBoundingClientRect().right > vw + 1) && !clippedBy(el)) {
+          add('overflow', 'error', el, 'Extends ' + Math.round(past(b)) + 'px past the ' + vw + 'px viewport and causes horizontal scrolling. Constrain it (w-full, max-w-full, min-w-0, flex-wrap) or stack columns at this width.' + table);
+        } else if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth > 0) {
+          // Only the box whose own text runs past the viewport: wrappers of an overflowing
+          // descendant have a large scrollWidth too, but the descendant is reported instead.
+          let far = -Infinity;
+          for (const c of el.childNodes) {
+            if (c.nodeType !== 3 || !/\S/.test(c.data)) continue;
+            range.selectNodeContents(c);
+            for (const r of range.getClientRects()) if (r.width > 0.5) far = Math.max(far, past(r));
+          }
+          if (far <= 1 || st(el).overflowX !== 'visible' || clippedBy(el)) continue;
           found++;
-          add('overflow', 'error', el, 'Content overflows this box by ' + Math.round(el.scrollWidth - el.clientWidth) + 'px (unbroken text or nowrap) and causes horizontal scrolling. Allow wrapping (break-words, whitespace-normal) or add min-w-0.' + table);
+          add('overflow', 'error', el, 'Content overflows this box by ' + Math.round(far - past(b)) + 'px (unbroken text or nowrap) and causes horizontal scrolling. Allow wrapping (break-words, whitespace-normal) or add min-w-0.' + table);
         }
       }
       if (!found) add('overflow', 'error', root, 'Page is ' + sw + 'px wide in a ' + vw + 'px viewport (horizontal scrolling). Constrain wide elements or stack columns at this width.');
@@ -576,20 +613,46 @@ function PAGE_LINT(opts) {
     }
     if (any && !h1) add('heading-h1', 'info', root, 'The screen has no h1; mark its main title as h1.');
     // 8. Contrast on solid backgrounds (last: it may scroll to hit-test below the fold).
-    const htmlBg = rgba(st(html).backgroundColor) || [0, 0, 0, 0], bodyBg = rgba(st(body).backgroundColor) || [0, 0, 0, 0];
-    const canvas = mix(htmlBg[3] > 0 ? htmlBg : bodyBg, [255, 255, 255, 1]);
-    const MEDIA = /^(IMG|VIDEO|CANVAS|IFRAME|OBJECT|EMBED|PICTURE)$/;
+    const MEDIA = /^(IMG|VIDEO|CANVAS|IFRAME|OBJECT|EMBED|PICTURE)$/, NONE = [0, 0, 0, 0];
+    // The canvas is painted by html's background, or body's when html has none (CSS propagation).
+    // A gradient there makes every text on it unmeasurable rather than "on white".
+    const hs = st(html), htmlPaints = hs.backgroundImage !== 'none' || (rgba(hs.backgroundColor) || NONE)[3] > 0, rs = htmlPaints ? hs : st(body);
+    const canvas = rs.backgroundImage !== 'none' ? null : mix(rgba(rs.backgroundColor) || NONE, [255, 255, 255, 1]);
+    // a over b, both possibly translucent.
+    const over = (a, b) => { const al = a[3] + b[3] * (1 - a[3]); return al <= 0 ? NONE : [0, 1, 2].map((k) => (a[k] * a[3] + b[k] * b[3] * (1 - a[3])) / al).concat(al); };
+    // A positioned ::before/::after covering its host (hero and card overlays) paints between the
+    // host's background and its text: composite a solid one; gradients or images make it unmeasurable.
+    const pseudo = (p, s, v) => {
+      const page = p === html || p === body, positioned = s.position !== 'static' || s.transform !== 'none';
+      let box = null;
+      for (const k of ['::before', '::after']) {
+        const ps = getComputedStyle(p, k);
+        if (ps.content === 'none' || ps.content === 'normal' || ps.display === 'none' || ps.visibility !== 'visible') continue;
+        const fixed = ps.position === 'fixed';
+        if (!fixed && !(ps.position === 'absolute' && (positioned || page))) continue;
+        const op = parseFloat(ps.opacity), img = ps.backgroundImage !== 'none', c = rgba(ps.backgroundColor) || NONE;
+        if (!(op >= 0.05) || (!img && !(c[3] > 0))) continue;
+        box = box || (fixed || (page && !positioned) ? { width: vw, height: vh } : p.getBoundingClientRect());
+        if (!(parseFloat(ps.width) >= box.width * 0.9 && parseFloat(ps.height) >= box.height * 0.9)) continue;
+        if (img || v === null || ps.mixBlendMode !== 'normal' || (ps.filter && ps.filter !== 'none') || (ps.backdropFilter && ps.backdropFilter !== 'none')) return null;
+        const top = [c[0], c[1], c[2], c[3] * Math.min(1, op)];
+        // z-index < 0 without a stacking context on the host paints below the host's background.
+        const below = parseInt(ps.zIndex, 10) < 0 && !((s.zIndex !== 'auto' && s.position !== 'static') || parseFloat(s.opacity) < 1 || s.transform !== 'none' || s.isolation === 'isolate' || (s.filter && s.filter !== 'none'));
+        v = below ? over(v, top) : over(top, v);
+      }
+      return v;
+    };
     // Paint layer of one element: null = unmeasurable (image, gradient, blend, filter, media),
     // [r,g,b,0] = transparent. Cached, as is the composited ancestor background.
-    const layerCache = new Map(), ancCache = new Map(), NONE = [0, 0, 0, 0];
+    const layerCache = new Map(), ancCache = new Map();
     const layer = (p) => {
       if (layerCache.has(p)) return layerCache.get(p);
       let v;
-      if (p === html || (p === body && !(htmlBg[3] > 0))) v = NONE;
-      else if (MEDIA.test(p.tagName) || p instanceof SVGElement) v = null;
+      if (MEDIA.test(p.tagName) || p instanceof SVGElement) v = null;
       else {
         const s = st(p);
-        v = s.backgroundImage !== 'none' || s.mixBlendMode !== 'normal' || (s.filter && s.filter !== 'none') || (s.backdropFilter && s.backdropFilter !== 'none') ? null : rgba(s.backgroundColor);
+        v = p === html || (p === body && !htmlPaints) ? NONE : s.backgroundImage !== 'none' || s.mixBlendMode !== 'normal' || (s.filter && s.filter !== 'none') || (s.backdropFilter && s.backdropFilter !== 'none') ? null : rgba(s.backgroundColor);
+        if (v !== null && !/^(INPUT|SELECT|TEXTAREA|BR|HR)$/.test(p.tagName)) v = pseudo(p, s, v);
       }
       layerCache.set(p, v); return v;
     };
@@ -601,9 +664,20 @@ function PAGE_LINT(opts) {
       for (let k = chain.length - 1; k >= 0; k--) { const c = layer(chain[k]); bg = c === null ? null : c[3] >= 0.999 ? c : bg === null ? null : c[3] > 0 ? mix(c, bg) : bg; ancCache.set(chain[k], bg); }
       return bg;
     };
+    // Hit-testing sees boxes with pointer-events:none too (decorative overlays often set it):
+    // a constructed sheet (no DOM node) forces them hit-testable until the finally block.
+    // adoptedStyleSheets is a live array, so the original list is copied before appending.
+    let hitMs = 0;
+    const HIT_MS = Math.min(400, budget / 3);
+    const hitTest = (x, y) => {
+      if (forced === null) try { forced = new CSSStyleSheet(); forced.replaceSync('*,*::before,*::after{pointer-events:auto!important}'); adopted = [...D.adoptedStyleSheets]; D.adoptedStyleSheets = [...adopted, forced]; } catch (e) { forced = false; }
+      const h0 = performance.now(), list = D.elementsFromPoint(x, y);
+      hitMs += performance.now() - h0;
+      return list;
+    };
     const background = (el, x, y) => {
       let chain = null;
-      if (x != null && x >= 0 && y >= 0 && x < vw && y < vh) { const s = D.elementsFromPoint(x, y), k = s.indexOf(el); if (k >= 0) chain = s.slice(k); }
+      if (x != null) { const s = hitTest(x, y), k = s.indexOf(el); if (k >= 0) chain = s.slice(k); }
       if (!chain) { const c = own(el, true); if (c === null) return null; const up = el.parentElement ? ancestors(el.parentElement) : canvas; return c[3] >= 0.999 ? c : up === null ? null : c[3] > 0 ? mix(c, up) : up; }
       const layers = [];
       for (const p of chain) {
@@ -611,8 +685,10 @@ function PAGE_LINT(opts) {
         if (c === null) return null;
         if (c[3] > 0) { layers.push(c); if (c[3] >= 0.999) break; }
       }
-      let bg = canvas;
-      for (let k = layers.length - 1; k >= 0; k--) bg = mix(layers[k], bg);
+      const last = layers[layers.length - 1], solid = !!last && last[3] >= 0.999;
+      if (!solid && canvas === null) return null;
+      let bg = solid ? last : canvas;
+      for (let k = layers.length - (solid ? 2 : 1); k >= 0; k--) bg = mix(layers[k], bg);
       return bg;
     };
     const pairs = new Map();
@@ -620,7 +696,7 @@ function PAGE_LINT(opts) {
       const c = rgba(o.s.webkitTextFillColor || o.s.color);
       if (!c || c[3] === 0) return;
       const bg = background(o.el, x, y);
-      if (!bg) { add('contrast-unknown', 'info', o.el, '"' + o.snip + '" sits on a background image or gradient, so contrast was not measured. Check it stays readable; a solid background or overlay behind text guarantees it.'); return; }
+      if (!bg) { add('contrast-unknown', 'info', o.el, '"' + o.snip + '" sits on a background image, gradient or blended layer, so contrast was not measured. Check it stays readable; a solid background or overlay behind text guarantees it.'); return; }
       const fg = mix([c[0], c[1], c[2], c[3] * Math.min(1, o.i.opacity)], bg);
       const a = lum(fg), b = lum(bg), ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
       const large = o.fs >= 24 || (o.fs >= 18.66 && (parseInt(o.s.fontWeight, 10) || 400) >= 700), need = large ? 3 : 4.5;
@@ -630,16 +706,16 @@ function PAGE_LINT(opts) {
       const f = add('contrast', 'error', o.el, '"' + o.snip + '": text ' + hex(fg) + ' on ' + hex(bg) + ' is ' + (Math.floor(ratio * 10) / 10).toFixed(1) + ':1; needs ' + need + ':1' + (large ? ' (large text)' : '') + '. ' + (a < b ? 'Darken the text or lighten the background.' : 'Lighten the text or darken the background.'));
       if (f) pairs.set(key, { f, more: 0 });
     };
-    // Hit-testing is costly (~1ms on large pages), so it only runs for text points that sit
+    // Hit-testing is costly (1–4ms on large pages), so it only runs for text points that sit
     // over a painted box which is not an ancestor (positioned overlays, media, negative
     // margins). Everything else uses the ancestor walk. Boxes are indexed in vertical bands.
     const BAND = 256, bands = new Map(), all = root.querySelectorAll('*');
-    let entries = 0, budget = 400000;
+    let entries = 0, scans = 400000;
     for (let k = 0; k < all.length && k < 8000 && entries < 200000; k++) {
       const el = all[k];
       if (el instanceof SVGElement && !(el instanceof SVGSVGElement)) continue;
       const s = st(el);
-      if (!MEDIA.test(el.tagName) && !(el instanceof SVGSVGElement) && s.backgroundImage === 'none' && !((rgba(s.backgroundColor) || [0, 0, 0, 0])[3] > 0)) continue;
+      if (!MEDIA.test(el.tagName) && !(el instanceof SVGSVGElement) && s.backgroundImage === 'none' && !((rgba(s.backgroundColor) || NONE)[3] > 0)) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) continue;
       const box = { el, l: r.left + sx, t: r.top + sy, r: r.right + sx, b: r.bottom + sy };
@@ -648,34 +724,41 @@ function PAGE_LINT(opts) {
     const overlaid = (el, ax, ay) => {
       let anc = null;
       for (const b of bands.get(Math.floor(ay / BAND)) || []) {
-        if (--budget < 0) return false;
+        if (--scans < 0) return false;
         if (ax < b.l || ax > b.r || ay < b.t || ay > b.b || b.el === el) continue;
         if (!anc) { anc = new Set(); for (let p = el.parentElement; p; p = p.parentElement) anc.add(p); }
         if (!anc.has(b.el) && !el.contains(b.el)) return true;
       }
       return false;
     };
+    // Overlaid text that cannot be hit-tested (budget, off-screen, inner scrollers) is counted,
+    // not judged against its ancestors: that background is known to be wrong there.
     const later = [];
-    let hits = 0;
+    let hits = 0, unmeasured = 0, judged = 0;
     for (const o of visible) {
       if (o.i.disabled) continue;
+      if ((++judged & 63) === 0 && late()) { skipped.push('contrast'); break; }
       const r = o.rects.find((q) => q.width >= 2) || o.rects[0], x = r.left + r.width / 2, y = r.top + r.height / 2;
-      if (hits >= 400 || !overlaid(o.el, x + sx, y + sy)) { judge(o, null, null); continue; }
+      if (!overlaid(o.el, x + sx, y + sy)) { judge(o, null, null); continue; }
+      if (hits >= 400 || hitMs > HIT_MS || o.i.fixed || x < 0 || x >= vw) { unmeasured++; continue; }
       hits++;
-      if (x >= 0 && x < vw && y >= 0 && y < vh) judge(o, x, y);
-      else if (o.i.fixed || x < 0 || x >= vw) judge(o, null, null);
+      if (y >= 0 && y < vh) judge(o, x, y);
       else later.push({ o, x, y: y + sy });
     }
     later.sort((a, b) => a.y - b.y);
     for (const it of later) {
+      if (hitMs > HIT_MS || late()) { unmeasured++; continue; }
       if (it.y - scrollY < 0 || it.y - scrollY >= vh) scrollTo({ top: Math.max(0, it.y - vh / 3), left: sx, behavior: 'instant' });
       const y = it.y - scrollY;
-      judge(it.o, it.x, y >= 0 && y < vh ? y : null);
+      if (y >= 0 && y < vh) judge(it.o, it.x, y); else unmeasured++;
     }
+    if (unmeasured) out.push({ rule: 'contrast-unknown', severity: 'info', screen, viewport, target: root === body ? 'page' : 'screen', message: unmeasured + ' text element' + (unmeasured > 1 ? 's' : '') + ' over overlapping layers could not be hit-tested, so their contrast was not measured.' });
     for (const { f, more } of pairs.values()) if (more) f.message += ' Same colours on ' + more + ' more element' + (more > 1 ? 's' : '') + '.';
   } finally {
+    if (forced) try { D.adoptedStyleSheets = adopted; } catch (e) {}
     if (scrollX !== sx || scrollY !== sy) scrollTo({ top: sy, left: sx, behavior: 'instant' });
   }
+  if (skipped.length) out.push({ rule: 'lint-partial', severity: 'info', screen, viewport, target: root === body ? 'page' : 'screen', message: 'Page lint stopped after ' + Math.round(performance.now() - t0) + 'ms on this very large page; skipped part of: ' + skipped.join(', ') + '.' });
   for (const rule in extra) out.push({ rule, severity: 'info', screen, viewport, target: root === body ? 'page' : 'screen', message: extra[rule] + ' more ' + rule + ' findings were omitted; fix the pattern everywhere.' });
   const rank = { error: 0, warning: 1, info: 2 };
   return out.map((f, i) => [f, i]).sort((a, b) => rank[a[0].severity] - rank[b[0].severity] || a[1] - b[1]).map((x) => x[0]).slice(0, max);
@@ -689,18 +772,22 @@ function cleanFindings(findings, cap = 2000) {
     if (out.length >= cap) break;
     if (!f || typeof f !== 'object' || typeof f.rule !== 'string' || !/^[a-z][a-z0-9-]{0,40}$/.test(f.rule) || !Object.prototype.hasOwnProperty.call(SEV, f.severity)) continue;
     const opt = (v, n) => (v == null || v === '' ? null : cut(v, n));
-    out.push({ rule: f.rule, severity: f.severity, screen: opt(f.screen, 60), viewport: opt(f.viewport, 40), target: cut(f.target ?? '', 120), message: cut(f.message ?? '', 400) });
+    out.push({ rule: f.rule, severity: f.severity, screen: opt(f.screen, 60), viewport: opt(f.viewport, 80), target: cut(f.target ?? '', 120), message: cut(f.message ?? '', 400) });
   }
   return out;
 }
 // Merge findings (static and page, several viewports): identical rule/screen/target/message
-// collapse into one finding whose viewport lists every viewport, errors first.
+// collapse into one finding whose viewport lists every viewport, errors first. Merging
+// already-merged lists is idempotent, and the most severe copy wins.
 function mergeFindings(...lists) {
   const map = new Map();
   for (const f of cleanFindings(lists.flat(), 20000)) {
     const k = [f.rule, f.screen, f.target, f.message].join('\u0000'), old = map.get(k);
-    if (!old) map.set(k, { ...f });
-    else if (f.viewport && !(old.viewport || '').split(',').includes(f.viewport)) old.viewport = old.viewport ? old.viewport + ',' + f.viewport : f.viewport;
+    if (!old) { map.set(k, { ...f }); continue; }
+    if (SEV[f.severity] < SEV[old.severity]) old.severity = f.severity;
+    const seen = old.viewport ? old.viewport.split(',') : [];
+    for (const v of f.viewport ? f.viewport.split(',') : []) if (v && !seen.includes(v)) seen.push(v);
+    old.viewport = seen.length ? cut(seen.join(','), 80) : null;
   }
   return sortFindings([...map.values()]);
 }

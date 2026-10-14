@@ -68,9 +68,9 @@ const chartHost = (name, attrs) => {
 };
 function safeHTML(html) {
   // HTML ignores "/>" on non-void elements, so <i data-icon="x"/> would swallow
-  // the rest of its parent. Close such icon and chart hosts explicitly; the
-  // sanitizer below still checks everything.
-  html = str(html, 'HTML', 160000, true).replace(/<(i|figure)(\s[^<>]*)?\/>/gi, (_, tag, rest = '') => `<${tag}${rest.trimEnd()}></${tag}>`);
+  // the rest of its parent. Close such icon and chart hosts explicitly (quote-aware,
+  // linear); the sanitizer below still checks everything.
+  html = markupPolicy.closeSelfClosingHosts(str(html, 'HTML', 160000, true));
   const svg = markupPolicy.svgPolicy();
   return svg.finish(sanitize(html, {
     // A model may return a full document despite the body-fragment instruction.

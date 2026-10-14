@@ -1,4 +1,7 @@
 'use strict';
+const MANUAL = 'Manual edit';
+// Revision prompt for a manual save; an optional note (≤ 300 characters) is kept as a prefix.
+const manualPrompt = (note) => (note ? `${note}\n\n${MANUAL}` : MANUAL);
 
 // Follow the selected revision's branch, including manual edits and restores.
 function initializeHistory(db) {
@@ -32,10 +35,12 @@ function briefHistory(db, projectId, revisionId, limit = 96000) {
     if (!r) break;
     if (['glm', 'demo', 'import', 'copy', 'template'].includes(r.origin)) rows.unshift({ revisionId: r.id, prompt: r.prompt });
     if (r.origin === 'manual') {
+      // A save note (e.g. "GLM element edit: …") is stored as a prompt prefix before MANUAL.
+      const note = r.prompt.endsWith(MANUAL) ? r.prompt.slice(0, -MANUAL.length).trim() : '';
       const parent = db.prepare('SELECT artifact FROM revisions WHERE id=? AND project_id=?').get(r.parent_id, projectId);
       if (parent) {
         const changes = changedFields(JSON.parse(parent.artifact), JSON.parse(r.artifact));
-        if (changes.length) rows.unshift({ revisionId: r.id, prompt: `User manual edits (preserve these changed fields unless a later request changes them): ${JSON.stringify(changes)}` });
+        if (changes.length) rows.unshift({ revisionId: r.id, prompt: `${note ? `User edit note: ${note}\n` : ''}User manual edits (preserve these changed fields unless a later request changes them): ${JSON.stringify(changes)}` });
       }
     }
     next = r.parent_id;
@@ -61,4 +66,4 @@ function changedFields(before, after, path = '') {
   return [{ field: path, ...(after === undefined ? { removed: true } : { value: after }) }];
 }
 
-module.exports = { initializeHistory, briefHistory };
+module.exports = { initializeHistory, briefHistory, manualPrompt, changedFields };
