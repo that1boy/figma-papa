@@ -1,0 +1,23 @@
+FORMA WINDOWS x64 TRANSFER PACKAGE
+Build date: 2 October 2026
+
+Includes:
+- Full application source and configuration templates.
+- Node.js v24.18.0 for Windows x64 in runtime/node.exe.
+- Node.js license and bundled third-party notices in runtime/LICENSE.
+- Runtime dependencies pinned by package-lock.json, with upstream licenses
+  retained inside each node_modules package.
+- Windows launchers and START-HERE-WINDOWS.txt.
+- SHA256SUMS.txt containing hashes for all other files in this bundle.
+
+Runtime provenance: copied from the locally installed Node.js v24.18.0.
+Node license source:
+https://raw.githubusercontent.com/nodejs/node/v24.18.0/LICENSE
+Dependency package versions and registry integrity values: package-lock.json.
+
+Not included: GLM model weights, real API credentials, a browser, LibreOffice,
+Poppler, npm CLI, personal projects or databases. Edge/Chrome already installed
+on the target PC is detected. No package downloads are performed by launchers.
+
+The original Docker source ZIP does not include the runtime/dependencies;
+use glm-design-pilot-windows-x64.zip for this portable Windows experiment.
