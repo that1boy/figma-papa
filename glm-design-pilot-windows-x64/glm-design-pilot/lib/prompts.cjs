@@ -95,10 +95,10 @@ const REVIEW_SYSTEM =
 
 // Directions give parallel generations genuinely different starting points.
 const DIRECTIONS = [
-  { name: 'Clear and calm', hint: 'Direction A — clear and calm: restrained neutral palette, generous whitespace, quiet surfaces, precise typography, minimal decoration.' },
-  { name: 'Bold and expressive', hint: 'Direction B — bold and expressive: confident accent use, large display type, strong contrast between sections, an energetic hero or header.' },
-  { name: 'Dense and efficient', hint: 'Direction C — dense and efficient: information-rich layouts for expert users, compact spacing, data tables and stats first, keyboard-friendly controls.' },
-  { name: 'Warm and editorial', hint: 'Direction D — warm and editorial: serif headings, warm neutrals, storytelling hierarchy, imagery placeholders built from shapes.' },
+  { name: 'Clear and calm', moods: ['clean', 'calm', 'product'], hint: 'Direction A — clear and calm: restrained neutral palette, generous whitespace, quiet surfaces, precise typography, minimal decoration.' },
+  { name: 'Bold and expressive', moods: ['bold', 'marketing', 'launch'], hint: 'Direction B — bold and expressive: confident accent use, large display type, strong contrast between sections, an energetic hero or header.' },
+  { name: 'Dense and efficient', moods: ['dense', 'enterprise', 'data'], hint: 'Direction C — dense and efficient: information-rich layouts for expert users, compact spacing, data tables and stats first, keyboard-friendly controls.' },
+  { name: 'Warm and editorial', moods: ['editorial', 'serif', 'warm'], hint: 'Direction D — warm and editorial: serif headings, warm neutrals, storytelling hierarchy, imagery placeholders built from shapes.' },
 ];
 
 function clip(text, max) {

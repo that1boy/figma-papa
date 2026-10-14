@@ -29,9 +29,10 @@ function table(x) {
   });
   return { headers, rows };
 }
+const MAX_REFERENCES = 6;
 function imageIndex(x) {
   if (x == null) return null;
-  if (!Number.isInteger(x) || x < 0 || x > 1) fail('imageIndex must be 0 or 1.');
+  if (!Number.isInteger(x) || x < 0 || x >= MAX_REFERENCES) fail(`imageIndex must be 0–${MAX_REFERENCES - 1}.`);
   return x;
 }
 function color(x, fallback) {
@@ -57,12 +58,48 @@ function safeCSS(css) {
     fail('CSS cannot contain external resources, escapes, comments, or executable expressions.');
   return css;
 }
+// Rich markup (0.3): inline SVG drawing elements with validated attribute values
+// (lib/svg.cjs), <i data-icon>, data-chart hosts and a few more semantic tags.
+const markupPolicy = require('./svg.cjs');
+const chartHost = (name, attrs) => {
+  const attribs = { ...attrs };
+  if (Object.hasOwn(attribs, 'data-chart') && markupPolicy.chartAttribute(attribs['data-chart']) == null) delete attribs['data-chart'];
+  return { tagName: name, attribs };
+};
 function safeHTML(html) {
-  return sanitize(str(html, 'HTML', 160000, true), {
+  // HTML ignores "/>" on non-void elements, so <i data-icon="x"/> would swallow
+  // the rest of its parent. Close such icon and chart hosts explicitly; the
+  // sanitizer below still checks everything.
+  html = str(html, 'HTML', 160000, true).replace(/<(i|figure)(\s[^<>]*)?\/>/gi, (_, tag, rest = '') => `<${tag}${rest.trimEnd()}></${tag}>`);
+  const svg = markupPolicy.svgPolicy();
+  return svg.finish(sanitize(html, {
     // A model may return a full document despite the body-fragment instruction.
     // Drop metadata text with its container instead of leaking it into the page.
-    nonTextTags: ['script', 'style', 'textarea', 'option', 'head', 'title'],
+    // math and foreignObject subtrees are dropped whole (namespace-confusion vectors).
+    // <title> outside <svg> is renamed to svg.DROP_TEXT and removed by svg.finish.
+    nonTextTags: ['script', 'style', 'textarea', 'option', 'head', 'title', 'xmp', 'math', 'foreignObject', 'foreignobject'],
+    onOpenTag: svg.onOpenTag,
+    onCloseTag: svg.onCloseTag,
     allowedTags: [
+      ...markupPolicy.SVG_TAGS,
+      svg.DROP,
+      svg.DROP_TEXT,
+      'i',
+      'figure',
+      'figcaption',
+      'h5',
+      'h6',
+      'blockquote',
+      'code',
+      'pre',
+      'kbd',
+      'mark',
+      'time',
+      'progress',
+      'meter',
+      'fieldset',
+      'legend',
+      'output',
       'main',
       'header',
       'footer',
@@ -143,10 +180,33 @@ function safeHTML(html) {
       button: ['type', 'disabled'],
       td: ['data-label'],
       th: ['data-label', 'scope'],
+      i: ['data-icon', 'aria-hidden'],
+      figure: ['data-chart'],
+      div: ['data-chart'],
+      time: ['datetime'],
+      progress: ['value', 'max'],
+      meter: ['value', 'min', 'max', 'low', 'high', 'optimum'],
+      fieldset: ['disabled', 'name'],
+      output: ['for', 'name'],
+      ...markupPolicy.SVG_ALLOWED_ATTRIBUTES,
     },
     allowedSchemes: [],
     allowedEmptyAttributes: ['hidden', 'data-row'],
     transformTags: {
+      ...svg.transformTags,
+      '*': svg.transformAll,
+      figure: chartHost,
+      div: chartHost,
+      i: (name, attrs) => {
+        const attribs = { ...attrs };
+        if (Object.hasOwn(attribs, 'data-icon')) {
+          const icon = markupPolicy.iconAttribute(attribs['data-icon']);
+          if (icon) attribs['data-icon'] = icon;
+          else delete attribs['data-icon'];
+        }
+        if (Object.hasOwn(attribs, 'aria-hidden') && !/^(?:true|false)$/.test(attribs['aria-hidden'])) delete attribs['aria-hidden'];
+        return { tagName: name, attribs };
+      },
       a: (name, attrs) => ({
         tagName: name,
         attribs: { ...attrs, href: /^#[a-zA-Z][\w-]*$/.test(attrs.href || '') ? attrs.href : '#' },
@@ -155,7 +215,7 @@ function safeHTML(html) {
         tagName: name,
         attribs: {
           ...attrs,
-          src: /^\{\{reference:[01]\}\}$/.test(attrs.src || '') ? attrs.src : '',
+          src: /^\{\{reference:[0-5]\}\}$/.test(attrs.src || '') ? attrs.src : '',
         },
       }),
       input: (name, attrs) => ({
@@ -179,7 +239,7 @@ function safeHTML(html) {
     },
     allowedSchemesByTag: { img: [] },
     allowProtocolRelative: false,
-  });
+  }));
 }
 function artifact(a, expectedKind) {
   if (
@@ -208,6 +268,10 @@ function artifact(a, expectedKind) {
     out.html = out.screens ? out.screens[0].html : safeHTML(a.html);
     out.css = safeCSS(a.css);
     if (a.designSystem) out.designSystem = designSystem(a.designSystem);
+    if (a.tweaks != null) {
+      const t = tweaks(a.tweaks);
+      if (t.length) out.tweaks = t;
+    }
     if (out.html.length < 10) fail('Web HTML is empty after sanitization.');
   } else if (a.kind === 'slides') {
     out.slides = arr(a.slides, 'Slides', 12).map((s, i) => {
@@ -260,31 +324,59 @@ function artifact(a, expectedKind) {
   }
   return out;
 }
+const TOKEN_COLORS = ['accent', 'accent2', 'background', 'surface', 'text', 'muted', 'border', 'success', 'warning', 'danger'];
+// Strict at the boundary (user and model input), then normalized by the kit so
+// 0.2 design systems and partial overrides gain every 0.3 token.
 function designSystem(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('Design system must be an object.');
-  const fonts = ['Arial', 'Segoe UI', 'Georgia', 'Verdana', 'Trebuchet MS'];
-  const font = value.font || 'Segoe UI';
-  if (!fonts.includes(font)) fail('Choose a supported local font.');
+  const { FONTS } = require('./presets.cjs');
+  const { normalizeTokens } = require('./kit.cjs');
+  for (const k of ['font', 'headingFont', 'bodyFont', 'monoFont'])
+    if (value[k] != null && !Object.hasOwn(FONTS, value[k])) fail('Choose a supported local font.');
+  for (const k of TOKEN_COLORS) if (value[k] != null) color(value[k]);
   const radius = value.radius ?? 12, spacing = value.spacing ?? 8;
   if (!Number.isInteger(radius) || radius < 0 || radius > 40 || !Number.isInteger(spacing) || spacing < 4 || spacing > 24) fail('Radius must be 0–40 and spacing 4–24.');
-  return { name: str(value.name || 'Project style', 'Style name', 80, true), ...theme(value), surface: color(value.surface, '#ffffff'), muted: color(value.muted, '#667085'), font, radius, spacing };
+  if (value.density != null && !['compact', 'comfortable', 'spacious'].includes(value.density)) fail('Density must be compact, comfortable or spacious.');
+  if (value.shadow != null && !['none', 'soft', 'medium', 'crisp'].includes(value.shadow)) fail('Shadow must be none, soft, medium or crisp.');
+  if (value.typeScale != null && !(typeof value.typeScale === 'number' && value.typeScale >= 1.1 && value.typeScale <= 1.5)) fail('Type scale must be between 1.1 and 1.5.');
+  if (value.preset != null) str(value.preset, 'Preset', 40);
+  const out = normalizeTokens({ ...value, name: str(value.name || 'Project style', 'Style name', 80, true), radius, spacing });
+  // Keep the user's spelling of colours they supplied (normalization lowercases).
+  for (const k of TOKEN_COLORS) if (value[k] != null) out[k] = value[k];
+  return out;
+}
+const TWEAK_UNITS = ['px', 'rem', 'em', '%', 'vh', 'vw', ''];
+function tweaks(list) {
+  return arr(list, 'Tweaks', 8).map((t) => {
+    if (!t || typeof t !== 'object' || typeof t.var !== 'string' || !/^--[a-z][a-z0-9-]{1,40}$/.test(t.var))
+      fail('Each tweak needs a CSS custom property name such as --sidebar-width.');
+    const min = Number(t.min), max = Number(t.max), step = Number(t.step ?? 1), value = Number(t.value ?? t.min);
+    if (![min, max, step, value].every(Number.isFinite) || min >= max || step <= 0) fail('Tweak ranges need numeric min < max and a positive step.');
+    if (!TWEAK_UNITS.includes(t.unit ?? 'px')) fail('Tweak units must be px, rem, em, %, vh, vw or empty.');
+    return { var: t.var, label: str(t.label || t.var.slice(2), 'Tweak label', 40, true), min, max, step, unit: t.unit ?? 'px', value: Math.min(max, Math.max(min, value)) };
+  }).filter((t, i, all) => all.findIndex((x) => x.var === t.var) === i);
 }
 function webScreens(a) { return a.screens || [{ id: 'home', name: 'Home', html: a.html }]; }
 function references(refs = []) {
-  return arr(refs, 'Reference images', 2).map((r) => {
+  return arr(refs, 'Reference images', MAX_REFERENCES).map((r) => {
     if (
       !r ||
       typeof r.data !== 'string' ||
       r.data.length > 4200000 ||
-      !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(r.data)
+      !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(r.data)
     )
-      fail('Reference images must be PNG or JPEG data URLs under 3 MB.');
+      fail('Reference images must be PNG, JPEG or WebP data URLs under 3 MB.');
     const b = Buffer.from(r.data.split(',')[1], 'base64');
-    const png = b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    const jpeg = b[0] === 255 && b[1] === 216 && b[2] === 255;
-    if ((!png && !jpeg) || png !== r.data.startsWith('data:image/png'))
+    const kind = b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      ? 'png'
+      : b[0] === 255 && b[1] === 216 && b[2] === 255
+        ? 'jpeg'
+        : b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP'
+          ? 'webp'
+          : null;
+    if (!kind || !r.data.startsWith(`data:image/${kind};`))
       fail('Image contents do not match the declared format.');
     return { name: str(r.name, 'Image name', 150, true), data: r.data };
   });
 }
-module.exports = { artifact, references, str, theme, KINDS, fail, safeHTML, safeCSS, designSystem, webScreens };
+module.exports = { artifact, references, str, theme, KINDS, fail, safeHTML, safeCSS, designSystem, tweaks, webScreens, MAX_REFERENCES };
