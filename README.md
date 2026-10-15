@@ -31,6 +31,11 @@ a complete portable ZIP with `scripts/package-windows.cjs` (below).
 
 **Windows (portable, no install):**
 
+A prebuilt `forma-windows-x64-0.3.0.zip` (with its SHA-256 and install notes)
+is on the [`claude/windows-package`](https://github.com/that1boy/figma-papa/tree/claude/windows-package)
+branch. Download it, check the hash, then continue at step 2. To build it
+yourself instead:
+
 1. On any internet-connected machine with Node.js 24:
    `cd glm-design-pilot-windows-x64/glm-design-pilot && node scripts/package-windows.cjs`
    This writes `dist/forma-windows-x64-0.3.0.zip` (about 42 MB) with Node.js,

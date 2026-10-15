@@ -11,9 +11,11 @@ WHAT YOU NEED
   run Node.js under company policy, Edge or Chrome, and network access from
   this PC to the organisation's GLM endpoint.
 - One of:
-  a) forma-windows-x64-0.3.0.zip, built with
+  a) forma-windows-x64-0.3.0.zip (includes Node.js and all dependencies):
+     download it from the repository's claude/windows-package branch and
+     check it against its .sha256 file, or build it with
      glm-design-pilot\scripts\package-windows.cjs on any internet-connected
-     machine (includes Node.js and all dependencies), or
+     machine, or
   b) an existing Forma 0.1.x/0.2.x portable installation plus this
      repository's glm-design-pilot-windows-x64\glm-design-pilot folder.
      0.3.0 adds no npm dependencies, so the existing runtime\node.exe and
