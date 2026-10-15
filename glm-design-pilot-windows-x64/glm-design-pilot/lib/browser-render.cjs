@@ -1,9 +1,13 @@
 'use strict';
 const {chromium}=require('playwright');
+// Pages are self-contained and every page request is aborted below. The browser's own
+// background traffic (connectivity checks, updates) also goes to a closed local port,
+// loopback included, so rendering never contacts any host from restricted networks.
+const NO_NETWORK=['--proxy-server=http://127.0.0.1:9','--proxy-bypass-list=<-loopback>'];
 const {PAGE_LINT,cleanFindings,mergeFindings,scoreFindings}=require('./lint.cjs');
 async function browserRender(payload) {
   if(typeof payload.html!=='string'||payload.html.length>9000000)throw new Error('Invalid HTML render request.');
-  const browser=await chromium.launch({headless:true,...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{}),args:['--disable-dev-shm-usage']});
+  const browser=await chromium.launch({headless:true,...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{}),args:['--disable-dev-shm-usage',...NO_NETWORK]});
   let timer;
   try{
     timer=setTimeout(()=>browser.close().catch(()=>{}),90000);

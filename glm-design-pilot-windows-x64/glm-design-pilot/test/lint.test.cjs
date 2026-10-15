@@ -466,6 +466,15 @@ describe('PAGE_LINT in Chromium', () => {
     assert.equal(o[0].target, 'div.stack > span.tag');
     assert.match(o[0].message, /"Overlapping badge" overlaps "Revenue grew strongly" \(div\.stack > p\)/);
   }));
+  it('ignores the hidden content of closed <details> (accordions)', guard(async () => {
+    // Chromium still lays out a closed details body under its summary, overlapping the next item.
+    const faq = (open) => `<div class="acc"><details${open ? ' open' : ''}><summary>First question</summary><p class="answer">An answer long enough to wrap onto a second line of text</p></details><details><summary>Second question</summary><p class="answer">Another answer</p></details></div>`;
+    const css = 'details{display:block}summary{display:block;padding:8px}.answer{margin:0;padding:0 8px}';
+    assert.deepEqual(of(await lint(faq(false), { css }), 'text-overlap'), [], 'closed answers are not visible text');
+    assert.deepEqual(of(await lint(faq(true), { css }), 'text-overlap'), [], 'an open answer pushes the next summary down');
+    const shown = await lint(faq(true) + '<p class="over">Overlapping note</p>', { css: css + '.acc{position:relative}.over{position:absolute;top:44px;left:12px;margin:0}' });
+    assert.ok(of(shown, 'text-overlap').some((x) => /Overlapping note/.test(x.message)), 'open content is still checked');
+  }));
   it('checks image alt text and accessible names of controls', guard(async () => {
     const f = await lint(`<img src="${GIF}" class="a" width="20" height="20"><img src="${GIF}" alt="" width="20" height="20"><img src="${GIF}" alt="image" class="g" width="20" height="20">
       <button class="icon"><svg width="16" height="16" aria-hidden="true"></svg></button><button aria-label="Close"><svg width="16" height="16"></svg></button><a href="#y" class="empty"></a>

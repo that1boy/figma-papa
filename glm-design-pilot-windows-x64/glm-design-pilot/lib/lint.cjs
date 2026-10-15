@@ -420,6 +420,10 @@ function PAGE_LINT(opts) {
     if (s.position === 'fixed' || s.position === 'sticky') r.fixed = true;
     if (n.matches(':disabled,[aria-disabled="true"]')) r.disabled = true;
     if (s.clip && s.clip !== 'auto' && /absolute|fixed/.test(s.position)) r.hidden = true;
+    // A closed <details> renders only its first <summary>; Chromium still reports layout
+    // boxes for the rest, which would otherwise read as text overlapping what follows.
+    const par = n.parentElement;
+    if (par && par.tagName === 'DETAILS' && !par.open && n !== par.querySelector(':scope > summary')) r.hidden = true;
     if (s.clipPath && s.clipPath !== 'none') { const b = n.getBoundingClientRect(); if (b.width <= 2 || b.height <= 2 || /inset\(\s*50%/.test(s.clipPath)) r.hidden = true; }
     if (s.textOverflow === 'ellipsis' || (s.webkitLineClamp && s.webkitLineClamp !== 'none')) r.ellipsis = true;
     if (n !== body && !NOCLIP.test(s.display)) {

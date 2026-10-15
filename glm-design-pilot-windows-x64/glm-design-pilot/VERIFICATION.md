@@ -6,12 +6,13 @@ Environment: Linux container, Node.js 24.18.0 (the version bundled for Windows),
 
 | Check | Result |
 | --- | --- |
-| `npm test` (unit, API and integration tests with mock GLM servers) | 329 passed, 0 failed |
+| `npm test` (unit, API and integration tests with mock GLM servers) | 331 passed, 0 failed |
 | `node test/browser.cjs` (demo mode: login, all formats, web interactions, responsive preview, edits, downloads, revisions, import, evaluations) | passed |
 | `node test/studio-browser.cjs` (starters, linked screens, forms, dialogs, visual edits, undo/redo, components, styles, feedback, copy, offline ZIP, responsive checks on all 11 starter screens) | passed |
 | `npm run test:glm-e2e` (GLM mode against a scripted streaming mock: preset, reference image, DOCX source, staged generation with review and correction, 3 directions, element edit, live tweaks, changed-screens revision, exports, document project) | passed |
 | Hostile markup probes rendered in Chromium (SVG scripts/handlers, `javascript:`/`data:` URLs, mXSS, chart/icon attribute injection, CSS and tweak injection) | nothing executed; dangerous CSS and tweaks rejected |
-| `node scripts/package-windows.cjs` | built forma-windows-x64-0.3.0.zip (41.9 MB, 1,651 files); extracted copy started and served `/api/config` |
+| `node scripts/package-windows.cjs` | built forma-windows-x64-0.3.0.zip (41.9 MB); every file matched the package SHA256SUMS; program files matched git; from the extracted copy `npm test`, `test/browser.cjs` and `test/glm-e2e.cjs` passed with only the bundled dependencies |
+| Renderer network isolation | no outbound connection attempts during renders (previously two per render from Chromium background traffic) |
 | Visual review | kit presets, starters, slide layouts (preview and LibreOffice-rendered PPTX) and GLM-mode workspace screenshots inspected |
 
 Not verified here: real GLM-5.3-Flash quality, latency or image handling; running on Windows; Docker; LibreOffice/Poppler rendering through the renderer service for every layout. These need the organisation's environment.
