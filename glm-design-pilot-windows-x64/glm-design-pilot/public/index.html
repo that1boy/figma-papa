@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Forma — Design studio</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/studio.css" />
+  </head>
+  <body>
+    <div id="login" class="login-screen">
+      <form id="login-form" class="login-card">
+        <div class="brandmark">f<span>●</span></div>
+        <span class="eyebrow">YOUR INTERNAL DESIGN STUDIO</span>
+        <h1>Good work starts<br />with a clear idea.</h1>
+        <p>Sign in to the shared pilot workspace.</p>
+        <label
+          >Pilot password<input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            placeholder="Password from your .env file"
+        /></label>
+        <button class="primary" type="submit">Open workspace <span aria-hidden="true">↗</span></button>
+        <p id="login-error" class="error" role="alert"></p>
+        <small>A small evaluation prototype. All participants share this workspace.</small>
+      </form>
+    </div>
+    <div id="app" hidden>
+      <aside class="sidebar">
+        <a href="#" class="brand" id="brand-home" aria-label="Forma home"
+          ><span class="brandmark small">f<span>●</span></span
+          ><span>forma<small>DESIGN STUDIO</small></span></a
+        >
+        <button class="primary new-button" id="new-project" aria-label="New project" title="New project"><b aria-hidden="true">＋</b> <span>New project</span></button>
+        <button class="secondary" id="import-project" aria-label="Import Forma JSON" title="Import Forma JSON"><b aria-hidden="true">↥</b> <span>Import Forma JSON</span></button>
+        <nav aria-label="Main navigation">
+          <button id="nav-projects" class="nav-item active" title="Projects"><span aria-hidden="true">▦</span> Projects</button
+          ><button id="nav-evaluation" class="nav-item" title="Evaluation"><span aria-hidden="true">◴</span> Evaluation</button>
+        </nav>
+        <div class="sidebar-section">RECENT PROJECTS</div>
+        <div id="recent-projects" class="recent-projects"></div>
+        <div class="sidebar-bottom">
+          <div class="connection-row"><span class="connection-dot" aria-hidden="true"></span><strong id="model-label">Local workspace</strong></div>
+          <small id="mode-description"></small
+          ><button class="text-button" id="test-connection">Check connection ↗</button
+          ><button class="text-button muted" id="logout">Sign out</button>
+        </div>
+      </aside>
+      <main class="main-area">
+        <header class="app-header">
+          <div id="breadcrumbs">Workspace <span>/</span> Projects</div>
+          <div class="header-right">
+            <span id="mode-badge" class="badge">Demo fixtures</span><span class="avatar" aria-hidden="true">P</span>
+          </div>
+        </header>
+        <section id="library" class="library">
+          <div class="hero">
+            <div>
+              <p class="eyebrow">FROM FIRST IDEA TO A CLICKABLE FLOW</p>
+              <h1>What will you<br />create today?</h1>
+              <p>
+                Design screens that connect. Refine the details.<br />Build a prototype your team can use and review.
+              </p>
+            </div>
+            <div class="hero-note">
+              <span class="note-symbol" aria-hidden="true">✳</span>
+              <p>Your ideas.<br />Your models.<br />Your network.</p>
+              <small>Designed for an internal pilot</small>
+            </div>
+          </div>
+          <div class="format-cards">
+            <button class="format-card" data-create="web">
+              <div class="format-visual web-visual">
+                <div class="mini-window">
+                  <div class="mini-top"><i></i><i></i><i></i></div>
+                  <div class="mini-web">
+                    <div></div>
+                    <b></b><span></span><em></em>
+                    <section><i></i><i></i><i></i></section>
+                  </div>
+                </div>
+              </div>
+              <div class="format-copy">
+                <span class="format-number">01 / INTERACTIVE</span>
+                <h2>UI / UX design <span aria-hidden="true">↗</span></h2>
+                <p>Websites, app screens and clickable flows.</p>
+              </div>
+            </button>
+            <button class="format-card" data-create="slides">
+              <div class="format-visual slide-visual">
+                <div class="mini-slide">
+                  <small>THE NEXT CHAPTER</small><b>A clearer<br />point of view.</b><span>01</span>
+                </div>
+              </div>
+              <div class="format-copy">
+                <span class="format-number">02 / PRESENT</span>
+                <h2>Presentation <span aria-hidden="true">↗</span></h2>
+                <p>Build a story in editable slides.</p>
+              </div>
+            </button>
+            <button class="format-card" data-create="document">
+              <div class="format-visual doc-visual">
+                <div class="mini-document">
+                  <small>PROJECT PROPOSAL</small><b>A plan worth<br />putting on paper.</b><i></i
+                  ><i></i><i></i><em></em><i></i><i></i>
+                </div>
+              </div>
+              <div class="format-copy">
+                <span class="format-number">03 / DOCUMENT</span>
+                <h2>Document <span aria-hidden="true">↗</span></h2>
+                <p>Make a proposal, report, or brief.</p>
+              </div>
+            </button>
+          </div>
+          <div class="section-heading">
+            <h2>Your projects <span id="project-count">0</span></h2>
+            <input
+              id="project-search"
+              type="search"
+              aria-label="Search projects"
+              placeholder="Search projects"
+            />
+          </div>
+          <div id="project-grid" class="project-grid"></div>
+          <div class="pilot-note">
+            <span aria-hidden="true">↗</span>
+            <p>
+              <strong>Useful is the goal.</strong> Evaluate finished work, including the time you
+              spend correcting it. Demo fixtures and imports are excluded from GLM evaluation summaries.
+            </p>
+          </div>
+        </section>
+        <section id="workspace" class="workspace" hidden>
+          <aside class="conversation" aria-label="Conversation">
+            <div class="conversation-heading">
+              <div class="heading-row"><span id="project-kind" class="eyebrow"></span><span id="model-pill" class="model-pill"></span></div>
+              <h2 id="project-title"></h2>
+            </div>
+            <section id="sources-panel" class="sources-panel" aria-label="Project sources">
+              <button type="button" id="sources-toggle" class="sources-toggle" aria-expanded="false" aria-controls="sources-body">
+                <span class="sources-title">Sources</span><span id="sources-count" class="sources-count"></span><span class="chevron" aria-hidden="true"></span>
+              </button>
+              <div id="sources-body" class="sources-body" hidden>
+                <ul id="sources-list" class="sources-list"></ul>
+                <div id="reference-strip" class="reference-strip"></div>
+                <div class="sources-actions">
+                  <button type="button" id="add-source" class="secondary sm">＋ Add documents</button
+                  ><input id="source-upload" type="file" multiple hidden accept=".docx,.pptx,.xlsx,.csv,.tsv,.txt,.md,.json,.html,.htm" />
+                  <small id="sources-hint" class="muted"></small>
+                </div>
+              </div>
+            </section>
+            <div id="chat-history" class="chat-history" aria-live="off"></div>
+            <div id="job-status" class="job-status" hidden>
+              <span class="spinner" aria-hidden="true"></span><span id="job-stage" role="status"></span
+              ><button id="cancel-job" class="text-button" type="button">Cancel</button>
+            </div>
+            <form id="generate-form" class="composer">
+              <div class="composer-box">
+                <label class="sr-only" for="prompt">Design brief or revision request</label
+                ><textarea
+                  id="prompt"
+                  placeholder="Describe what you need, who it is for, and what it must include…"
+                  required
+                  maxlength="24000"
+                  rows="3"
+                ></textarea>
+                <div class="composer-bar">
+                  <div id="directions-control" class="directions-control" role="radiogroup" aria-label="Directions" hidden>
+                    <span class="directions-label" title="Explore several design directions in parallel (web only). Directions skip the review pass.">Directions</span
+                    ><button type="button" role="radio" data-directions="1" aria-checked="true" aria-label="One design, directions off" title="One design">1</button
+                    ><button type="button" role="radio" data-directions="2" aria-checked="false" aria-label="2 directions" title="2 directions">2</button
+                    ><button type="button" role="radio" data-directions="3" aria-checked="false" aria-label="3 directions" title="3 directions">3</button
+                    ><button type="button" role="radio" data-directions="4" aria-checked="false" aria-label="4 directions" title="4 directions">4</button>
+                  </div>
+                  <span class="composer-keys" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
+                  <button class="primary" id="generate-button" type="submit" title="Send (Ctrl+Enter)">
+                    Generate <span>↑</span></button
+                  >
+                </div>
+              </div>
+              <div class="composer-options">
+                <label class="review-toggle"
+                  ><input id="review-checkbox" type="checkbox" checked /> Review content
+                    and layout</label
+                >
+              </div>
+              <div id="suggestions" class="suggestions" hidden aria-label="Suggested revisions"></div>
+              <p id="composer-hint" class="composer-hint"></p>
+            </form>
+          </aside>
+          <div class="artifact-area">
+            <div class="artifact-toolbar">
+              <div class="tabs" role="tablist">
+                <button class="tab active" data-tab="preview">Preview</button
+                ><button class="tab" data-tab="edit">Edit</button
+                ><button class="tab" data-tab="history">History</button
+                ><button class="tab" data-tab="checks">Checks</button>
+              </div>
+              <div class="artifact-actions">
+                <button id="evaluate-button" class="secondary">Evaluate</button
+                ><select id="export-format" aria-label="Export format"></select
+                ><button id="export-button" class="primary compact">Export ↓</button>
+              </div>
+            </div>
+            <div id="directions-strip" class="directions-strip" hidden aria-label="Design directions"></div>
+            <div id="empty-artifact" class="empty-artifact">
+              <div class="empty-icon" aria-hidden="true">✳</div>
+              <h2>Your first version starts here.</h2>
+              <p>
+                Add a brief on the left. Include source facts,<br />constraints, and the audience
+                you have in mind.
+              </p>
+            </div>
+            <div id="preview-panel" class="artifact-panel" hidden>
+              <div class="preview-controls">
+                <div>
+                  <button id="desktop-view" class="chip active">Desktop</button
+                  ><button id="mobile-view" class="chip">Mobile</button>
+                </div>
+                <span id="preview-caption"></span
+                ><button id="native-view" class="text-button">Rendered export</button>
+              </div>
+              <div id="frame-wrap" class="frame-wrap">
+                <iframe
+                  id="preview-frame"
+                  title="Artifact preview"
+                  sandbox="allow-scripts allow-forms"
+                ></iframe>
+              </div>
+              <div id="native-pages" class="native-pages" hidden></div>
+            </div>
+            <div id="edit-panel" class="artifact-panel edit-panel" hidden>
+              <div class="panel-intro">
+                <h2>Edit the content</h2>
+                <p>
+                  Save a new revision to preserve your previous work. Web prototypes support HTML,
+                  CSS, and built-in interactions.
+                </p>
+              </div>
+              <div id="edit-fields"></div>
+              <details>
+                <summary>Advanced artifact JSON</summary>
+                <textarea id="artifact-json" class="code-editor" spellcheck="false"></textarea
+                ><button id="apply-json" class="secondary">Load JSON into editor</button>
+              </details>
+              <button id="save-edit" class="primary">Save new revision</button>
+            </div>
+            <div id="history-panel" class="artifact-panel history-panel" hidden></div>
+            <div id="checks-panel" class="artifact-panel checks-panel" hidden></div>
+          </div>
+        </section>
+        <section id="evaluation" class="evaluation" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">EVIDENCE BEFORE EXPANSION</p>
+              <h1>Does it help people<br />finish better work?</h1>
+            </div>
+            <a class="secondary" href="/api/evaluations.csv">Download all records ↓</a>
+          </div>
+          <p class="evaluation-description">
+            These summaries include GLM-origin work only. Time includes waiting, editing, and
+            cleanup as entered by the reviewer. Demo fixtures and imports are excluded. Results are grouped by format.
+          </p>
+          <div id="evaluation-summary" class="evaluation-summary"></div>
+          <div class="table-wrap">
+            <table class="evaluation-table">
+              <thead>
+                <tr>
+                  <th>Project / revision</th>
+                  <th>Mode</th>
+                  <th>Quality</th>
+                  <th>Accepted</th>
+                  <th>Time saved</th>
+                </tr>
+              </thead>
+              <tbody id="evaluation-rows"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <dialog id="import-dialog">
+      <form id="import-form">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">CONTINUE EXISTING WORK</span><h2>Import Forma JSON</h2></div>
+          <button type="button" class="icon-button" data-close="import-dialog" aria-label="Close">×</button>
+        </div>
+        <p>Open a Forma JSON export as a new project. Edit, preview and export without a model connection.</p>
+        <label>Forma JSON file (up to 1 MB)<input id="import-file" type="file" accept=".json,application/json" required /></label>
+        <label>Original brief (optional)<textarea id="import-brief" rows="3" maxlength="24000" placeholder="Source facts and constraints to keep for future revisions"></textarea></label>
+        <label>Reference image 1 (if used)<input id="import-image-0" type="file" accept="image/png,image/jpeg" /></label>
+        <label>Reference image 2 (if used)<input id="import-image-1" type="file" accept="image/png,image/jpeg" /></label>
+        <p class="muted">JSON exports contain content, not images or revision history. Reattach original PNG/JPEG images in their original slots (up to 3 MB each). Imports are labelled separately from GLM results.</p>
+        <p id="import-error" class="error" role="alert"></p>
+        <button class="primary" id="import-submit" type="submit">Import as new project</button>
+      </form>
+    </dialog>
+    <dialog id="create-dialog" class="create-dialog" aria-labelledby="create-heading">
+      <form id="create-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">START WITH THE BRIEF</span>
+            <h2 id="create-heading">New project</h2>
+          </div>
+          <button type="button" class="icon-button" data-close="create-dialog" aria-label="Close">
+            ×
+          </button>
+        </div>
+        <div class="dialog-body">
+          <fieldset class="field-group">
+            <legend>Format</legend>
+            <!-- The select keeps the value (and the automation hook); the cards are the visible control. -->
+            <select id="create-kind" class="sr-only" tabindex="-1" aria-hidden="true">
+              <option value="web">UI / UX prototype</option>
+              <option value="slides">Presentation</option>
+              <option value="document">Document</option>
+            </select>
+            <div class="format-choices">
+              <label class="format-choice"
+                ><input type="radio" name="create-kind-choice" value="web" checked /><span class="format-icon kind-web" aria-hidden="true"></span
+                ><span class="format-choice-text"><strong>UI / UX prototype</strong><small>Screens and clickable flows</small></span></label
+              ><label class="format-choice"
+                ><input type="radio" name="create-kind-choice" value="slides" /><span class="format-icon kind-slides" aria-hidden="true"></span
+                ><span class="format-choice-text"><strong>Presentation</strong><small>Editable PPTX slides</small></span></label
+              ><label class="format-choice"
+                ><input type="radio" name="create-kind-choice" value="document" /><span class="format-icon kind-document" aria-hidden="true"></span
+                ><span class="format-choice-text"><strong>Document</strong><small>Reports, proposals, briefs</small></span></label
+              >
+            </div>
+          </fieldset>
+          <label
+            >Project name<input
+              id="create-title"
+              required
+              maxlength="140"
+              placeholder="e.g. Employee services portal" /></label
+          ><label
+            >Brand and style guidance<textarea
+              id="create-brand"
+              rows="3"
+              maxlength="12000"
+              placeholder="Colours, type, tone, layout preferences…"
+            >
+Use a restrained violet accent, neutral backgrounds, clear typography, and generous whitespace. Keep the writing specific and professional.</textarea
+            ></label
+          >
+          <fieldset class="field-group">
+            <legend>Design system <small>Seeds colours, type and spacing. Brand guidance still applies.</small></legend>
+            <div id="look-grid" class="look-grid"></div>
+          </fieldset>
+          <div class="upload-grid">
+            <div class="upload-zone" id="reference-zone">
+              <label class="upload-target" for="create-images"
+                ><span class="upload-icon upload-image" aria-hidden="true"></span
+                ><span><strong>Reference images</strong><small id="reference-caption">PNG, JPEG or WebP</small></span></label
+              ><input id="create-images" type="file" accept="image/png,image/jpeg,image/webp" multiple />
+              <p id="reference-note" class="upload-note"></p>
+              <div id="image-list" class="image-list"></div>
+            </div>
+            <div class="upload-zone" id="source-zone">
+              <label class="upload-target" for="create-sources"
+                ><span class="upload-icon upload-doc" aria-hidden="true"></span
+                ><span><strong>Source documents</strong><small id="source-caption">DOCX, PPTX, XLSX, CSV, TXT, MD, JSON, HTML</small></span></label
+              ><input id="create-sources" type="file" multiple accept=".docx,.pptx,.xlsx,.csv,.tsv,.txt,.md,.json,.html,.htm" />
+              <p class="upload-note">GLM reads the text as source facts. Up to 6 files, 15 MB each.</p>
+              <ul id="create-source-list" class="file-list"></ul>
+            </div>
+          </div>
+        </div>
+        <div class="dialog-footer">
+          <p id="create-error" class="error" role="alert"></p>
+          <p class="small muted">
+            Files go only to the configured model endpoint. All pilot participants can see these
+            projects.
+          </p>
+          <button class="primary" type="submit" id="create-submit">Create project <span aria-hidden="true">→</span></button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="evaluate-dialog">
+      <form id="evaluate-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">REVIEW THE ACTUAL DELIVERABLE</span>
+            <h2>Evaluate this revision</h2>
+          </div>
+          <button type="button" class="icon-button" data-close="evaluate-dialog" aria-label="Close">
+            ×
+          </button>
+        </div>
+        <label
+          >Overall quality<select id="quality">
+            <option value="3">3 — useful with changes</option>
+            <option value="5">5 — ready to use</option>
+            <option value="4">4 — minor cleanup</option>
+            <option value="2">2 — major rework</option>
+            <option value="1">1 — unusable</option>
+          </select></label
+        >
+        <div class="time-fields">
+          <label
+            >Usual manual time (min)<input
+              id="baseline-minutes"
+              type="number"
+              min="0"
+              step="0.1"
+              required /></label
+          ><label
+            >Pilot work + waiting (min)<input
+              id="work-minutes"
+              type="number"
+              min="0"
+              step="0.1"
+              required /></label
+          ><label
+            >Extra cleanup (min)<input
+              id="cleanup-minutes"
+              type="number"
+              min="0"
+              step="0.1"
+              value="0"
+              required
+          /></label>
+        </div>
+        <label class="checkbox-row"
+          ><input id="critical-errors" type="checkbox" /> Contains critical factual or functional
+          errors</label
+        ><label class="checkbox-row"
+          ><input id="accepted" type="checkbox" /> Usable for the intended task</label
+        ><label
+          >What worked, and what needed repair?<textarea
+            id="evaluation-notes"
+            rows="3"
+            maxlength="5000"
+          ></textarea></label
+        ><button class="primary" type="submit">Save evaluation</button>
+      </form>
+    </dialog>
+    <div id="toast" role="status" class="toast" hidden></div>
+    <script src="/app.js"></script>
+    <script src="/studio.js"></script>
+  </body>
+</html>

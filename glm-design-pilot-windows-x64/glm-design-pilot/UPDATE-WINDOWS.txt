@@ -1,0 +1,29 @@
+FORMA 0.3.0 WINDOWS UPDATE
+
+For an existing Forma 0.1.x or 0.2.x portable Windows installation.
+0.3.0 adds no npm dependencies: the installed runtime\node.exe and
+node_modules keep working. No package download or npm install is needed.
+
+1. Stop Forma (press ENTER in the startup window, or Stop in Forma.exe).
+2. Copy your whole existing glm-design-pilot folder to a new 0.3.0 folder
+   while it is stopped. Keep the original, including data\, as a backup.
+3. Copy the CONTENTS of this repository's glm-design-pilot folder over the
+   new copy, replacing program files. Do not delete the destination first
+   and do not create glm-design-pilot\glm-design-pilot nesting.
+4. Keep runtime\node.exe, node_modules, .env and data from the old copy.
+   The new assets\ folder (fonts, icons, kit CSS) must be copied too.
+5. Optional: add the new GLM_* settings from .env.windows.example to your
+   .env. Every one has a safe default, so existing settings keep working.
+6. Run 03-diagnostics.cmd. It checks dependencies, the bundled assets and
+   your settings. Then run 02-start.cmd (or Forma.exe) and reload the
+   browser page. package.json should say 0.3.0.
+7. Startup migrates the database: it adds job columns and a source
+   documents table and converts nothing else. Saved projects, revisions,
+   styles, feedback and evaluations are kept. Older design systems gain the
+   new tokens automatically.
+
+To roll back, stop 0.3.0 and start the original backup with its own data.
+Never run two versions against the same data folder.
+
+Alternatively build a complete new package on an internet-connected machine
+with: node scripts\package-windows.cjs (see START-HERE-WINDOWS.txt).

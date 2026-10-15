@@ -1,23 +1,22 @@
-FORMA WINDOWS x64 TRANSFER PACKAGE
-Build date: 2 October 2026
+FORMA 0.3.0 - GLM DESIGN STUDIO
+Build date: 15 October 2026
 
-Includes:
-- Full application source and configuration templates.
-- Node.js v24.18.0 for Windows x64 in runtime/node.exe.
-- Node.js license and bundled third-party notices in runtime/LICENSE.
-- Runtime dependencies pinned by package-lock.json, with upstream licenses
-  retained inside each node_modules package.
-- Windows launchers and START-HERE-WINDOWS.txt.
-- SHA256SUMS.txt containing hashes for all other files in this bundle.
+Application source, configuration templates, tests and documentation for
+Forma 0.3.0, plus bundled design assets:
+- assets/fonts: 11 open-source font families (SIL Open Font License 1.1,
+  from Fontsource; latin subset, variable weight). See assets/fonts/OFL.txt.
+- assets/icons/lucide.json: 1,890 Lucide icons (ISC licence).
+- assets/kit/forma-kit.css: Forma's component library.
 
-Runtime provenance: copied from the locally installed Node.js v24.18.0.
-Node license source:
-https://raw.githubusercontent.com/nodejs/node/v24.18.0/LICENSE
-Dependency package versions and registry integrity values: package-lock.json.
+The portable Windows ZIP built by scripts/package-windows.cjs also contains:
+- runtime/node.exe and runtime/LICENSE: Node.js v24.18.0 for Windows x64,
+  downloaded from nodejs.org and verified against its SHASUMS256.txt.
+- node_modules: production dependencies pinned by package-lock.json
+  (docx, pptxgenjs, playwright, sanitize-html and their dependencies),
+  installed with npm ci --ignore-scripts. Upstream licences stay inside each
+  package.
+- SHA256SUMS.txt covering every file in the package.
 
-Not included: GLM model weights, real API credentials, a browser, LibreOffice,
-Poppler, npm CLI, personal projects or databases. Edge/Chrome already installed
-on the target PC is detected. No package downloads are performed by launchers.
-
-The original Docker source ZIP does not include the runtime/dependencies;
-use glm-design-pilot-windows-x64.zip for this portable Windows experiment.
+Not included: GLM model weights, API credentials, a browser (installed
+Edge/Chrome is used), LibreOffice, Poppler, .env, databases or projects.
+No package downloads are performed by the launch scripts.

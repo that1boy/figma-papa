@@ -1,0 +1,7 @@
+node_modules/
+runtime/node.exe
+.env
+data/
+test-results/
+*.log
+dist/
