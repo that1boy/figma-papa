@@ -12,7 +12,8 @@
     "test": "node --test test/*.test.cjs",
     "test:browser": "node test/browser.cjs && node test/studio-browser.cjs",
     "test:docker": "node test/docker-smoke.cjs",
-    "test:studio": "node test/studio-browser.cjs"
+    "test:studio": "node test/studio-browser.cjs",
+    "test:glm-e2e": "node test/glm-e2e.cjs"
   },
   "dependencies": {
     "docx": "9.6.1",

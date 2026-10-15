@@ -275,15 +275,15 @@ function artifact(a, expectedKind) {
     if (out.html.length < 10) fail('Web HTML is empty after sanitization.');
   } else if (a.kind === 'slides') {
     out.slides = arr(a.slides, 'Slides', 12).map((s, i) => {
-      if (!['cover', 'bullets', 'two-column', 'table', 'image'].includes(s.layout))
-        fail('Unknown slide layout.');
+      if (!s || typeof s !== 'object' || !SLIDE_LAYOUTS.includes(s.layout))
+        fail(`Unknown slide layout. Use one of: ${SLIDE_LAYOUTS.join(', ')}.`);
       const slide = {
         id: `slide-${i + 1}`,
         layout: s.layout,
         title: str(s.title, 'Slide title', 100, true),
         subtitle: str(s.subtitle, 'Subtitle', 200),
         body: str(s.body, 'Slide body', 650),
-        bullets: strings(s.bullets, 'Bullets', 6, 180),
+        bullets: s.layout === 'agenda' ? strings(s.bullets, 'Agenda items', 8, 120) : strings(s.bullets, 'Bullets', 6, 180),
         notes: str(s.notes, 'Speaker notes', 3000),
         imageIndex: imageIndex(s.imageIndex),
         table: table(s.table),
@@ -298,9 +298,11 @@ function artifact(a, expectedKind) {
         fail('Two-column slides require two columns.');
       if (s.layout === 'image' && slide.imageIndex == null)
         fail('Image slides require imageIndex.');
+      if (V2_LAYOUTS.includes(s.layout)) Object.assign(slide, v2Slide(s, slide, i + 1));
       return slide;
     });
     if (!out.slides.length) fail('At least one slide is required.');
+    if (a.designSystem) out.designSystem = designSystem(a.designSystem);
   } else {
     out.subtitle = str(a.subtitle, 'Subtitle', 300);
     out.blocks = arr(a.blocks, 'Document blocks', 60).map((b, i) => {
@@ -321,8 +323,71 @@ function artifact(a, expectedKind) {
       return block;
     });
     if (!out.blocks.length) fail('At least one document block is required.');
+    if (a.designSystem) out.designSystem = designSystem(a.designSystem);
   }
   return out;
+}
+// Slides v2 layouts (spec 8). Each takes the common slide fields plus its own, with clear limits;
+// content a layout cannot show is refused instead of silently disappearing from the slide.
+const { SLIDE_LAYOUTS, V2_LAYOUTS } = require('./slide-layout.cjs');
+const V2_BODY = { section: 300, quote: 0, stats: 240, timeline: 200, cards: 200, chart: 400, agenda: 200 };
+function v2Slide(s, slide, n) {
+  const where = `Slide ${n} (${s.layout})`;
+  const list = (x, name, min, max, what) => {
+    if (!Array.isArray(x) || x.length < min || x.length > max) fail(`${where} needs ${min}–${max} ${name}${what ? `, each ${what}` : ''}.`);
+    return x.map((v, k) => {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) fail(`${where} ${name} ${k + 1} must be an object${what ? ` ${what}` : ''}.`);
+      return v;
+    });
+  };
+  const limit = V2_BODY[s.layout];
+  if (slide.body.length > limit) fail(limit ? `${where} body must be at most ${limit} characters; move detail to speaker notes.` : `${where} shows only the quote and attribution; move other text to speaker notes.`);
+  if (s.layout !== 'agenda' && slide.bullets.length) fail(`${where} does not show bullets; use a bullets or agenda slide for lists.`);
+  if (slide.table) fail(`${where} does not show a table; use a table slide.`);
+  if (slide.columns.length) fail(`${where} does not show columns; use a two-column slide.`);
+  if (slide.imageIndex != null) fail(`${where} does not show an image; use an image slide.`);
+  if (s.layout === 'agenda' && slide.bullets.length < 3) fail(`${where} needs 3–8 agenda items in bullets.`);
+  if (s.layout === 'quote') {
+    return { quote: str(s.quote, `${where} quote`, 300, true), attribution: str(s.attribution, `${where} attribution`, 120) };
+  }
+  if (s.layout === 'stats') {
+    return {
+      stats: list(s.stats, 'stats', 2, 4, '{"value","label","detail"}').map((x, k) => {
+        const value = str(x.value == null ? x.value : String(x.value), `${where} stat ${k + 1} value`, 18, true).trim();
+        if (!/\d/.test(value)) fail(`${where} stat ${k + 1} value must be a number supplied in the brief, such as 42%, 3.5x or USD 6,000.`);
+        return { value, label: str(x.label, `${where} stat ${k + 1} label`, 60, true), detail: str(x.detail, `${where} stat ${k + 1} detail`, 140) };
+      }),
+    };
+  }
+  if (s.layout === 'timeline') {
+    return {
+      steps: list(s.steps, 'steps', 3, 6, '{"label","title","detail"}').map((x, k) => ({
+        label: str(x.label, `${where} step ${k + 1} label`, 24),
+        title: str(x.title, `${where} step ${k + 1} title`, 60, true),
+        detail: str(x.detail, `${where} step ${k + 1} detail`, 160),
+      })),
+    };
+  }
+  if (s.layout === 'cards') {
+    const { resolveIcon } = require('./icons.cjs');
+    return {
+      cards: list(s.cards, 'cards', 3, 4, '{"title","body","icon"}').map((x, k) => {
+        const icon = str(x.icon, `${where} card ${k + 1} icon`, 40).trim().toLowerCase();
+        // Unknown icon names are dropped (the card shows its number), matching web icon fallbacks.
+        return { title: str(x.title, `${where} card ${k + 1} title`, 60, true), body: str(x.body, `${where} card ${k + 1} body`, 220, true), icon: (icon && resolveIcon(icon)) || '' };
+      }),
+    };
+  }
+  if (s.layout === 'chart') {
+    if (s.chart == null) fail(`${where} needs chart: {"type","title","labels","series":[{"name","values"}],"unit"} using only numbers from the brief.`);
+    const { validateChart } = require('./charts.cjs');
+    try {
+      return { chart: validateChart(s.chart) };
+    } catch (e) {
+      fail(`${where} chart: ${e.message}`);
+    }
+  }
+  return {};
 }
 const TOKEN_COLORS = ['accent', 'accent2', 'background', 'surface', 'text', 'muted', 'border', 'success', 'warning', 'danger'];
 // Strict at the boundary (user and model input), then normalized by the kit so
