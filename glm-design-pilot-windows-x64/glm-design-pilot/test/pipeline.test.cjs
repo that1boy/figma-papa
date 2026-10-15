@@ -81,10 +81,12 @@ test('staged web generation plans, builds the first screen, then the rest in par
     { delay: 120 },
   );
   t.after(m.close);
-  const metrics = { modelCalls: 0, inputTokens: 0, outputTokens: 0 };
-  const a = await pipeline.generate(m.cfg, project(), 'Design the service desk', null, ctx(metrics));
+  const metrics = { modelCalls: 0, inputTokens: 0, outputTokens: 0 }, stages = [];
+  const a = await pipeline.generate(m.cfg, project(), 'Design the service desk', null, { ...ctx(metrics), onStage: (...args) => stages.push(args) });
   assert.equal(m.calls.length, 4);
   assert.ok(isPlan(m.calls[0].body));
+  // Progress for the server's job JSON: screen counts once the parallel builds finish.
+  assert.deepEqual(stages.filter((s) => s[2]?.total).map((s) => [s[1], s[2]]), [['Built 2 of 3 screens', { done: 2, total: 3 }], ['Built 3 of 3 screens', { done: 3, total: 3 }]]);
   assert.equal(m.calls[0].body.messages[1].content[1].image_url.url, png, 'plan sees the reference');
   assert.equal(a.screens.map((s) => s.id).join(), 'overview,requests,new');
   assert.equal(a.html, a.screens[0].html);

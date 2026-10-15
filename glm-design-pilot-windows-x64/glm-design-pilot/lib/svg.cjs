@@ -251,25 +251,29 @@ const iconAttribute = (v) => {
 
 // Locate elements in (sanitized) HTML with htmlparser2 so callers can splice
 // replacements into the original string without re-serializing anything else.
-// Returns [{ name, attribs (decoded), start, openEnd, end, textOnly, text }];
-// `text` is the element's text content when textOnly (no child elements).
+// Returns [{ name, attribs (decoded), parent, start, openEnd, end, textOnly, text }];
+// `parent` is the enclosing tag name (null at the top level) and `text` the element's
+// text content when textOnly (no child elements). test(name, attribs, parent) selects.
 // Linear in the input: only the innermost open element can still be text-only.
 function findElements(html, test) {
-  const found = [], open = [];
+  const found = [], open = [], names = [];
   let live = null; // innermost open matched element with no child element yet
   const parser = new Parser(
     {
       onopentag(name, attribs) {
         if (live) live.textOnly = false;
-        const rec = test(name, attribs) ? { name, attribs, start: parser.startIndex, openEnd: parser.endIndex + 1, textOnly: true, text: '' } : null;
+        const parent = names.length ? names[names.length - 1] : null;
+        const rec = test(name, attribs, parent) ? { name, attribs, parent, start: parser.startIndex, openEnd: parser.endIndex + 1, textOnly: true, text: '' } : null;
         live = rec;
         open.push(rec);
+        names.push(name);
       },
       ontext(t) {
         if (live) live.text += t;
       },
       onclosetag(name, implied) {
         const rec = open.pop();
+        names.pop();
         live = null; // the parent now has a child element
         if (!rec) return;
         rec.end = !implied ? parser.endIndex + 1 : Math.max(rec.openEnd, Math.min(parser.startIndex, html.length));

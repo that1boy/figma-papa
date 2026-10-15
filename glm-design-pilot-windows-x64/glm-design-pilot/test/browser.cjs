@@ -202,7 +202,7 @@ const { demo } = require('../lib/demo.cjs');
     await page.locator('[data-field="title"]').fill('Offline document');
     await page.locator('#save-edit').click();
     await page.locator('#project-title').filter({hasText:'Offline document'}).waitFor();
-    assert.match(await page.locator('#project-kind').innerText(),/Imported · no model/);
+    assert.match(await page.locator('#project-kind').innerText(),/Imported · no model/i);
     await page.screenshot({path:path.join(results,'06-import-workspace.png'),fullPage:true});
     await page.locator('#export-format').selectOption('docx');
     const importedDownload = page.waitForEvent('download');

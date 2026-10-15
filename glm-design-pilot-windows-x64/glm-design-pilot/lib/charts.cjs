@@ -20,8 +20,10 @@ const seriesColor = (i) => {
   return i < 6 ? c : `color-mix(in oklab,${c} 55%,${SURFACE})`;
 };
 // Variants are switched by container width (MARKUP_CSS); md is the inline default.
-// Each renders at roughly 0.85–1.3× its unit size inside its width band.
-const VARIANTS = { sm: { w: 360, h: 236, ticks: 4 }, md: { w: 540, h: 280, ticks: 5 }, lg: { w: 820, h: 330, ticks: 5 } };
+// SVG text scales with the drawing, so each band keeps its 12-unit text between about
+// 11 and 16 px: xs below 400 px (11 px from a 275 px container, e.g. a card on a 390 px
+// phone), sm 400–560, md 560–780, lg from 780 px.
+const VARIANTS = { xs: { w: 300, h: 220, ticks: 4 }, sm: { w: 420, h: 250, ticks: 4 }, md: { w: 580, h: 290, ticks: 5 }, lg: { w: 820, h: 330, ticks: 5 } };
 
 function invalid(message) {
   return Object.assign(new Error(message), { status: 400, code: 'chart' });
@@ -260,11 +262,12 @@ function svgLegend(c, w, line) {
   }
   return { svg: `<g aria-hidden="true" font-size="12" style="fill:currentColor">${out}</g>`, height: y + 26 };
 }
-// Category labels along x: truncate to about seven characters, then thin out.
-function xAxisLabels(labels, at, slot, y, w) {
+// Category labels along x: truncate (to about `keep` characters), then thin out. Bars keep
+// every category readable down to four characters; lines and areas thin out earlier.
+function xAxisLabels(labels, at, slot, y, w, keep = 7) {
   const longest = Math.max(...labels.map((l) => width(l)));
   let k = 1;
-  while (k < labels.length && slot * k < Math.min(longest, width('x'.repeat(7))) + 10) k++;
+  while (k < labels.length && slot * k < Math.min(longest, width('x'.repeat(keep))) + 10) k++;
   const budget = Math.max(width('xxx'), slot * k - 8);
   let out = '';
   labels.forEach((l, i) => {
@@ -333,7 +336,7 @@ function cartesian(c, v, legend, variant) {
           .map((s, i) => `<text x="${n1(centre(i))}" y="${n1(shown[i] < 0 ? y(shown[i]) + 14 : y(shown[i]) - 6)}">${esc(s)}</text>`)
           .join('')}</g>`;
     }
-    axis += xAxisLabels(c.labels, centre, band, y1 + 18, w);
+    axis += xAxisLabels(c.labels, centre, band, y1 + 18, w, 4);
   } else {
     const inset = n > 1 ? Math.min(12, (x1 - x0) / (n - 1) / 2) : 0;
     const slot = n > 1 ? (x1 - x0 - 2 * inset) / (n - 1) : x1 - x0;
@@ -473,9 +476,10 @@ function dataTable(c) {
   return `<div class="sr-only" style="${HIDDEN}"><table><caption>${esc(titleOf(c))}</caption><thead>${head}</thead><tbody>${rows}</tbody></table></div>`;
 }
 const swatch = (i, line) => `<span style="flex:none;width:${line ? 14 : 10}px;height:${line ? 3 : 10}px;border-radius:${line ? 2 : 3}px;background:${seriesColor(i)}"></span>`;
-// The block expandCharts inserts into a chart host: legend, SVG (three width
-// variants for axis charts), optional caption and the hidden data table.
-function chartHTML(spec) {
+// The block expandCharts inserts into a chart host: legend, SVG (four width
+// variants for axis charts), optional caption and the hidden data table
+// (opts.dataTable === false leaves the table out).
+function chartHTML(spec, opts = {}) {
   const c = validateChart(spec), line = c.type === 'line' || c.type === 'area';
   let visual, legend = '';
   if (c.type === 'pie' || c.type === 'donut') {
@@ -494,23 +498,35 @@ function chartHTML(spec) {
         .join('')}</div>`;
   }
   const caption = c.caption ? `<p style="margin:0;font-size:12px;line-height:1.4;color:${MUTED}">${esc(c.caption)}</p>` : '';
-  return `<div data-forma-generated="" class="forma-chart" data-forma-chart="${esc(c.type)}" style="position:relative;display:grid;gap:12px;min-width:0">${legend}${visual}${caption}${dataTable(c)}</div>`;
+  return `<div data-forma-generated="" class="forma-chart" data-forma-chart="${esc(c.type)}" style="position:relative;display:grid;gap:12px;min-width:0">${legend}${visual}${caption}${opts.dataTable === false ? '' : dataTable(c)}</div>`;
 }
 function invalidNotice(message) {
   return `<div data-forma-generated="" role="note" class="forma-chart-invalid" style="padding:12px 14px;border:1px dashed var(--danger,#d92d20);border-radius:var(--radius,8px);background:color-mix(in oklab,var(--danger,#d92d20) 7%,transparent);font-size:13px;line-height:1.45"><strong style="font-weight:600;color:var(--danger,#b42318)">Chart data invalid:</strong> ${esc(message)}</div>`;
 }
-// Each drawn chart adds up to ~70 KB; past this many per call hosts get a notice instead.
-const MAX_CHARTS = 120;
+// A spec title is shown above the chart: as the figure's <figcaption> when the host is a
+// <figure> without an authored one (the caption also names the figure), otherwise as a
+// paragraph. It is generated markup, so the inspector skips it like the drawing.
+const TITLE_STYLE = 'display:block;margin:0 0 10px;font-size:0.875rem;font-weight:600;line-height:1.35;color:var(--text,currentColor);overflow-wrap:anywhere';
+function titleHTML(title, figure) {
+  const tag = figure ? 'figcaption' : 'p';
+  return `<${tag} data-forma-generated="" class="forma-chart-title" style="${TITLE_STYLE}">${esc(title)}</${tag}>`;
+}
+const TABLE_PARTS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr']);
+// A drawn chart is 5–140 KB (four width variants of up to 24 labels × 6 series). A page shares
+// one budget across its screens (pageHTML passes it) so the expanded page stays well under the
+// renderer's 9 MB limit; hosts past the budget get a visible notice instead.
+const MAX_CHARTS = 120, MAX_CHART_BYTES = 6000000;
+const chartBudget = () => ({ charts: MAX_CHARTS, bytes: MAX_CHART_BYTES });
 // Fill every <figure|div data-chart> with its chart (or a visible notice when the
 // spec is invalid). The host keeps its attributes and children and gains
 // data-forma-expanded="chart" plus data-forma-source (its original outer HTML).
 // A host nested inside another host is left alone: it is already part of the
 // outer host's data-forma-source (and the inspector skips it), and copying every
 // level's subtree again would make the output grow quadratically.
-function expandCharts(html) {
+function expandCharts(html, budget = chartBudget()) {
   html = String(html ?? '');
   if (!/data-chart/i.test(html)) return html;
-  let coveredTo = -1, drawn = 0;
+  let coveredTo = -1;
   // Already expanded hosts still cover their subtree, which keeps a second pass idempotent.
   const hosts = findElements(html, (name, a) => (name === 'figure' || name === 'div') && Object.hasOwn(a, 'data-chart')).filter((el) => {
     if (el.start < coveredTo) return false;
@@ -520,8 +536,15 @@ function expandCharts(html) {
   const edits = hosts.map((el) => {
     let body;
     try {
-      if (++drawn > MAX_CHARTS) throw invalid(`Too many charts on one page; only the first ${MAX_CHARTS} are drawn.`);
-      body = chartHTML(el.attribs['data-chart']);
+      if (budget.charts <= 0 || budget.bytes <= 0) throw invalid('Too many or too large charts on one page; only the first ones are drawn.');
+      budget.charts--;
+      const spec = validateChart(el.attribs['data-chart']);
+      // A host written directly inside a table (invalid, but model output) is foster-parented out of
+      // it by the HTML parser, which would also tear a nested data <table> out of the generated block:
+      // the drawing would lose its wrapper and the inspector its stored element order.
+      body = chartHTML(spec, { dataTable: !TABLE_PARTS.has(el.parent) });
+      if (spec.title) body = titleHTML(spec.title, el.name === 'figure' && !/<figcaption[\s>]/i.test(html.slice(el.openEnd, el.end))) + body;
+      budget.bytes -= body.length;
     } catch (e) {
       body = invalidNotice(e.code === 'chart' ? e.message : 'The chart could not be drawn.');
     }
@@ -533,7 +556,7 @@ function expandCharts(html) {
 }
 // Presentation-time expansion of the compact model markup. Charts run first so
 // a host's data-forma-source is its stored form even if it contains icons.
-const expandMarkup = (html) => expandIcons(expandCharts(html));
+const expandMarkup = (html, budget) => expandIcons(expandCharts(html, budget));
 // Page CSS for expanded markup. Without it charts show their 540-unit variant and
 // icons sit on the text baseline. It lives in a cascade layer, so wherever it is
 // placed the kit, utilities and model CSS (unlayered) override its defaults; the
@@ -543,7 +566,8 @@ const MARKUP_CSS = `@layer forma-markup{:where(svg[data-forma-expanded="icon"]){
 [data-forma-variants]{container-type:inline-size}
 [data-forma-variants]>svg{display:none!important}
 [data-forma-variants]>[data-forma-variant="md"]{display:block!important}
-@container (max-width:469.98px){[data-forma-variants]>[data-forma-variant="md"]{display:none!important}[data-forma-variants]>[data-forma-variant="sm"]{display:block!important}}
-@container (min-width:700px){[data-forma-variants]>[data-forma-variant="md"]{display:none!important}[data-forma-variants]>[data-forma-variant="lg"]{display:block!important}}}`;
+@container (max-width:559.98px){[data-forma-variants]>[data-forma-variant="md"]{display:none!important}[data-forma-variants]>[data-forma-variant="sm"]{display:block!important}}
+@container (max-width:399.98px){[data-forma-variants]>[data-forma-variant="sm"]{display:none!important}[data-forma-variants]>[data-forma-variant="xs"]{display:block!important}}
+@container (min-width:780px){[data-forma-variants]>[data-forma-variant="md"]{display:none!important}[data-forma-variants]>[data-forma-variant="lg"]{display:block!important}}}`;
 
-module.exports = { expandCharts, expandMarkup, validateChart, chartSVG, chartHTML, niceTicks, compact, tickLabel, unitize, MARKUP_CSS, CHART_TYPES: TYPES };
+module.exports = { expandCharts, expandMarkup, chartBudget, validateChart, chartSVG, chartHTML, niceTicks, compact, tickLabel, unitize, MARKUP_CSS, CHART_TYPES: TYPES };

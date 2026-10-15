@@ -357,15 +357,35 @@ async function runJob(job) {
     review: null,
     render: null,
   };
-  // Progress is written at most once per second, and always when the phase changes.
+  // Progress is written at most once per second, and always when the phase changes. An update
+  // inside the second is kept and written when it ends, so the newest state (e.g. "Built 3 of 3
+  // screens") is never lost to the throttle.
   let phase = null,
-    written = 0;
+    written = 0,
+    pending = null,
+    timer = null;
+  const write = (progress) => {
+    written = Date.now();
+    db.prepare("UPDATE jobs SET stage=?,progress=?,updated=? WHERE id=? AND status='running'").run(
+      progress.label,
+      JSON.stringify(progress),
+      now(),
+      job.id,
+    );
+  };
+  const flush = () => {
+    timer = null;
+    const p = pending;
+    pending = null;
+    if (!p || signal.aborted) return;
+    try {
+      write(p);
+    } catch (e) {
+      console.error('Progress update failed:', e.message);
+    }
+  };
   const stage = (s, label, extra) => {
     if (signal.aborted) throw new Error('Cancelled.');
-    const t = Date.now();
-    if (s === phase && t - written < 1000) return;
-    phase = s;
-    written = t;
     const info = extra && typeof extra === 'object' ? extra : {};
     const chars = /([\d.]+)k characters/.exec(label || '')?.[1];
     const progress = {
@@ -376,12 +396,17 @@ async function runJob(job) {
       chars: Number.isFinite(info.chars) ? info.chars : chars ? Math.round(Number(chars) * 1000) : null,
       calls: metrics.modelCalls || 0,
     };
-    db.prepare("UPDATE jobs SET stage=?,progress=?,updated=? WHERE id=? AND status='running'").run(
-      progress.label,
-      JSON.stringify(progress),
-      now(),
-      job.id,
-    );
+    const wait = 1000 - (Date.now() - written);
+    if (s === phase && wait > 0) {
+      pending = progress;
+      timer ??= setTimeout(flush, wait);
+      return;
+    }
+    phase = s;
+    pending = null;
+    clearTimeout(timer);
+    timer = null;
+    write(progress);
   };
   try {
     const p = project(job.project_id),
@@ -455,6 +480,7 @@ async function runJob(job) {
       cancelled ? 'Cancelled by user.' : e.message,
     );
   } finally {
+    clearTimeout(timer);
     controllers.delete(job.id);
     running--;
     setImmediate(pump);

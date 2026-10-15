@@ -153,11 +153,12 @@ function validateFull(value, current, project) {
 function context(cfg, ctx) {
   const limit = ctx.limit || pool(Math.max(1, Math.min(8, cfg.parallel || 3)));
   let last = 0;
-  const progress = (label, force) => {
+  // extra: { done, total } screen counts or { chars } streamed so far (server progress JSON).
+  const progress = (label, force, extra) => {
     const t = Date.now();
     if (!force && t - last < 1000) return;
     last = t;
-    ctx.onStage?.('generating', label);
+    ctx.onStage?.('generating', label, extra);
   };
   async function call(stage, system, content, extra = [], label = '', json = stage === 'plan') {
     const messages = [{ role: 'system', content: system }, { role: 'user', content }, ...extra];
@@ -168,7 +169,10 @@ function context(cfg, ctx) {
         stage,
         json,
         onDelta: label
-          ? (d) => progress(`${label} · ${Math.round(((d.contentChars || 0) + (d.reasoningChars || 0)) / 100) / 10}k characters`)
+          ? (d) => {
+              const chars = (d.contentChars || 0) + (d.reasoningChars || 0);
+              progress(`${label} · ${Math.round(chars / 100) / 10}k characters`, false, { chars });
+            }
           : undefined,
       }),
     );
@@ -257,7 +261,7 @@ async function createWeb(cfg, project, prompt, ctx, direction = null) {
     built = await Promise.all(
       rest.map((screen) =>
         buildScreen(cfg, project, prompt, thePlan, screen, ds, c, css, head.html).then((s) => {
-          c.progress(`Built ${++done} of ${thePlan.screens.length} screens`, true);
+          c.progress(`Built ${++done} of ${thePlan.screens.length} screens`, true, { done, total: thePlan.screens.length });
           return s;
         }),
       ),

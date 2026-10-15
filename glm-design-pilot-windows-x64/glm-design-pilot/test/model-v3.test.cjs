@@ -152,11 +152,10 @@ test('golden: staged web generation with kit, utilities, icons, a chart and twea
   const findings = lint.staticLint(a);
   assert.deepEqual(findings.filter((f) => f.severity === 'error'), [], lint.findingsPrompt(findings));
 
-  // Page assembly (lib/presentation.cjs, upgraded concurrently by another integrator).
+  // Page assembly (lib/presentation.cjs): kit tokens, generated utilities, expanded icons and charts.
   const { pageHTML } = require('../lib/presentation.cjs');
   const page = pageHTML(a);
-  const upgraded = /data-forma-expanded/.test(page) && page.includes('--accent-soft');
-  if (!upgraded) return t.skip('pageHTML does not yet inline kit/utility CSS and expand icons/charts (presentation upgrade pending); page assertions skipped.');
+  assert.ok(page.includes('--accent-soft'), 'kit tokens inlined');
   assert.match(page, /\.sm\\:grid-cols-3/, 'generated utility CSS for the classes used');
   assert.match(page, /<svg[^>]*data-forma-expanded="icon"/, 'icons expanded to inline SVG');
   assert.match(page, /data-forma-expanded="chart"/, 'chart figure expanded');
@@ -393,6 +392,13 @@ test('prompts only promise classes, icons, chart types, actions and tokens that 
   assert.deepEqual(U.classifyClasses(classes).unknown, [], 'every class in the prompts is a kit class or a supported utility');
   const mentioned = ['btn-primary', 'btn-secondary', 'btn-ghost', 'app-shell', 'sidebar', 'topbar', 'page', 'page-header', 'card-title', 'num', 'is-active', 'icon-tile', 'chart', 'tab', 'tabs-pill', 'hero', 'badge-success'];
   for (const c of mentioned) assert.ok(kit.has(c), `kit class ${c}`);
+  // Class names the kit reference names in prose (not only in class="" examples), including
+  // "badge-success|warning|danger" shorthand, are kit classes or supported utilities.
+  const prose = K.KIT_REFERENCE.replace(/<[^>]*>/g, ' ').replace(/--[a-z0-9-]+/g, ' ');
+  const shorthand = [...prose.matchAll(/\b([a-z]+-)([a-z]+(?:\|[a-z-]+)+)/g)].flatMap((m) => m[2].split('|').map((s) => (s.startsWith(m[1]) ? s : m[1] + s)));
+  const words = new Set(['hand-written', 'max-width', 'auto-fit', 'pre-styled', 'long-form', 'right-aligned', 'right-aligns', 'aria-label', 'data-label', 'data-chart', 'aria-selected', 'aria-current', 'aria-pressed']);
+  const named = [...new Set([...prose.split(/[\s·|,;:()+>…=.]+/).filter((w) => /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/.test(w)), ...shorthand])].filter((w) => !kit.has(w) && !words.has(w));
+  assert.deepEqual(U.classifyClasses(named).unknown, [], 'every class the kit reference names exists');
   assert.deepEqual(U.classifyClasses(['text-muted', 'tabular-nums', 'bg-surface', 'bg-accent-soft', 'text-accent-strong', 'size-4', 'size-5', 'min-w-0', 'sm:grid-cols-2', 'md:grid-cols-3', 'lg:grid-cols-4']).unknown, []);
 
   const names = new Set(I.iconNames());

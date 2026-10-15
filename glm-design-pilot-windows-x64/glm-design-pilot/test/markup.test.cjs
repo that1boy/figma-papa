@@ -415,7 +415,8 @@ test('chartSVG renders every type as accessible, deterministic SVG', () => {
   assert.match(charts.chartSVG(SPECS.donut), />\$42k<\/text><text[^>]*>Total</);
   assert.match(charts.chartSVG(SPECS.line), />99\.9%</, 'end value label');
   assert.match(charts.chartSVG(SPECS.sparkline), /preserveAspectRatio="none"/);
-  assert.match(charts.chartSVG(SPECS.bar, { variant: 'sm' }), /viewBox="0 0 360 236"/);
+  assert.match(charts.chartSVG(SPECS.bar, { variant: 'xs' }), /viewBox="0 0 300 220"/);
+  assert.match(charts.chartSVG(SPECS.bar, { variant: 'sm' }), /viewBox="0 0 420 250"/);
   assert.match(charts.chartSVG(SPECS.bar, { width: 1000, height: 400 }), /viewBox="0 0 1000 400"/);
 });
 
@@ -432,7 +433,7 @@ test('chart text is escaped everywhere it appears', () => {
 test('chartHTML adds width variants, legend, caption and a hidden data table', () => {
   const out = charts.chartHTML({ ...SPECS.grouped, caption: 'Source: finance' });
   assert.match(out, /^<div data-forma-generated="" class="forma-chart" data-forma-chart="bar"/);
-  assert.equal((out.match(/data-forma-variant="(sm|md|lg)"/g) || []).length, 3);
+  assert.equal((out.match(/data-forma-variant="(xs|sm|md|lg)"/g) || []).length, 4);
   assert.match(out, /data-forma-variant="md" style="display:block;/);
   assert.match(out, /data-forma-variant="sm" style="display:none;/);
   assert.match(out, /<div aria-hidden="true" style="display:flex;flex-wrap:wrap[^"]*">.*2025.*2026/);
@@ -467,6 +468,22 @@ test('expandCharts fills hosts, marks them and shows invalid specs visibly', () 
   assert.equal(charts.expandCharts(out), out, 'idempotent');
   assert.equal(charts.expandCharts('<p>No charts</p>'), '<p>No charts</p>');
   assert.match(charts.expandCharts('<figure data-chart="{oops"></figure>'), /Chart data invalid:<\/strong> Chart data is not valid JSON\./);
+});
+
+test('expandCharts shows the spec title: a figcaption for figures, a paragraph otherwise, escaped, never duplicated', () => {
+  const spec = (title) => JSON.stringify({ type: 'bar', ...(title ? { title } : {}), labels: ['a', 'b'], series: [{ name: 's', values: [1, 2] }] }).replace(/'/g, '&#39;');
+  const titleOf = (out) => [...out.matchAll(/<(figcaption|p) data-forma-generated="" class="forma-chart-title"[^>]*>([^<]*)<\/\1>/g)].map((m) => [m[1], m[2]]);
+  const fig = charts.expandCharts(S.safeHTML(`<figure class="chart" data-chart='${spec('Signups <b>& "more"</b>')}'></figure>`));
+  assert.deepEqual(titleOf(fig), [['figcaption', 'Signups &lt;b&gt;&amp; &quot;more&quot;&lt;/b&gt;']]);
+  assert.match(fig, /data-forma-expanded="chart"[^>]*><figcaption data-forma-generated=""/, 'first child of the figure');
+  assert.doesNotMatch(fig, /<b>/);
+  // An authored figcaption stays the only one; the title becomes a paragraph.
+  const captioned = charts.expandCharts(S.safeHTML(`<figure data-chart='${spec('Signups')}'><figcaption>Weekly</figcaption></figure>`));
+  assert.deepEqual(titleOf(captioned), [['p', 'Signups']]);
+  assert.equal((captioned.match(/<figcaption/g) || []).length, 1);
+  assert.deepEqual(titleOf(charts.expandCharts(S.safeHTML(`<div data-chart='${spec('Signups')}'></div>`))), [['p', 'Signups']]);
+  assert.deepEqual(titleOf(charts.expandCharts(S.safeHTML(`<figure data-chart='${spec('')}'></figure>`))), [], 'no title, no caption');
+  assert.equal(charts.expandCharts(fig), fig, 'idempotent');
 });
 
 test('expandMarkup expands charts and icons together; markup.cjs re-exports the API', () => {
@@ -582,12 +599,18 @@ test('Chromium shows the chart variant that fits its container and hides the dat
   try {
     const page = await b.newPage({ viewport: { width: 1400, height: 900 } });
     const chart = S.safeHTML(`<figure class="chart" data-chart='${JSON.stringify(SPECS.grouped)}'></figure>`);
-    const boxes = [320, 600, 1000].map((w) => `<div style="width:${w}px" class="box">${markup.expandMarkup(chart)}</div>`).join('');
+    const boxes = [290, 320, 390, 480, 600, 1000].map((w) => `<div style="width:${w}px" class="box">${markup.expandMarkup(chart)}</div>`).join('');
     const flexRow = `<div style="display:flex;gap:12px;width:500px" id="row"><span>KPI</span>${markup.expandMarkup(chart)}</div>`;
     await page.setContent(`<!doctype html><style>${PAGE_CSS}${markup.MARKUP_CSS}</style><body>${boxes}${flexRow}</body>`);
     const r = await page.evaluate(() => ({
       visible: [...document.querySelectorAll('.box')].map((box) => [...box.querySelectorAll('[data-forma-variant]')].filter((s) => getComputedStyle(s).display !== 'none').map((s) => s.dataset.formaVariant)),
       widths: [...document.querySelectorAll('.box')].map((box) => Math.round([...box.querySelectorAll('[data-forma-variant]')].find((s) => getComputedStyle(s).display !== 'none').getBoundingClientRect().width)),
+      // Rendered size of the smallest axis or value text (12 user units scaled with the drawing).
+      text: [...document.querySelectorAll('.box')].map((box) => {
+        const svg = [...box.querySelectorAll('[data-forma-variant]')].find((s) => getComputedStyle(s).display !== 'none');
+        return Math.min(...[...svg.querySelectorAll('text')].map((t) => t.getBoundingClientRect().height ? (Number(t.closest('[font-size]').getAttribute('font-size')) * svg.getBoundingClientRect().width) / svg.viewBox.baseVal.width : 99));
+      }),
+      caption: (() => { const c = document.querySelector('.box figure > figcaption.forma-chart-title'); return c && [c.textContent, getComputedStyle(c).display, c.getBoundingClientRect().height > 0]; })(),
       table: (() => {
         const t = document.querySelector('.sr-only').getBoundingClientRect();
         return [t.width, t.height];
@@ -596,8 +619,10 @@ test('Chromium shows the chart variant that fits its container and hides the dat
       overflow: document.documentElement.scrollWidth > innerWidth,
       titles: document.querySelectorAll('svg[role="img"] > title').length,
     }));
-    assert.deepEqual(r.visible, [['sm'], ['md'], ['lg']]);
-    assert.deepEqual(r.widths, [320, 600, 1000]);
+    assert.deepEqual(r.visible, [['xs'], ['xs'], ['xs'], ['sm'], ['md'], ['lg']]);
+    assert.deepEqual(r.widths, [290, 320, 390, 480, 600, 1000]);
+    for (const [i, px] of r.text.entries()) assert.ok(px >= 11, `axis text ${px.toFixed(1)}px in a ${[290, 320, 390, 480, 600, 1000][i]}px container`);
+    assert.deepEqual(r.caption, ['Revenue', 'block', true], 'the spec title is a visible figcaption');
     assert.deepEqual(r.table, [1, 1]);
     assert.ok(r.rowChart > 300, `chart in a flex row keeps its width (${r.rowChart})`);
     assert.equal(r.overflow, false);

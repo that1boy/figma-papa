@@ -4,7 +4,7 @@ const { webScreens } = require('./schema.cjs');
 const { INTERACTIONS, inspectorScript } = require('./design-runtime.cjs');
 const { normalizeTokens, kitCSS } = require('./kit.cjs');
 const { utilityCSS, collectClasses } = require('./utilities.cjs');
-const { expandMarkup, MARKUP_CSS } = require('./markup.cjs');
+const { expandMarkup, chartBudget, MARKUP_CSS } = require('./markup.cjs');
 const escape = (s) =>
   String(s ?? '').replace(
     /[&<>"']/g,
@@ -36,11 +36,12 @@ function webStyles(a, tweakSelector = ':root') {
 const webCSS = (a) => { const s = webStyles(a); return [s.base, s.kit, s.markup, s.utilities, s.model, s.tweaks].filter(Boolean).join('\n'); };
 // Stored screen HTML -> page HTML: references first, then icons and charts. In the editor, images
 // remember their reference number so the inspector can report stored-equivalent markup.
-function screenBody(html, refs, editor) {
+// All screens of a page share one chart budget (lib/charts.cjs).
+function screenBody(html, refs, editor, budget) {
   let out = String(html ?? '');
   if (editor) out = out.replace(/ src="\{\{reference:([0-5])\}\}"/g, (_, n) => ` src="${refs[Number(n)]?.data || ''}" data-forma-reference="${n}"`);
   out = out.replace(REFERENCE, (_, n) => refs[Number(n)]?.data || '');
-  try { return expandMarkup(out); } catch { return out; }
+  try { return expandMarkup(out, budget); } catch { return out; }
 }
 function tableHTML(t) {
   return t
@@ -71,7 +72,8 @@ function pageHTML(a, refs = [], page = null, editor = null) {
   if (a.kind === 'web') {
     const screens = webScreens(a);
     const chosen = page === null ? screens : screens.filter(s => s.id === page);
-    body = chosen.map((s,i) => `<div data-forma-screen="${escape(s.id)}" aria-label="${escape(s.name)}"${i ? ' hidden' : ''}>${screenBody(s.html, refs, editor)}</div>`).join('');
+    const budget = chartBudget();
+    body = chosen.map((s,i) => `<div data-forma-screen="${escape(s.id)}" aria-label="${escape(s.name)}"${i ? ' hidden' : ''}>${screenBody(s.html, refs, editor, budget)}</div>`).join('');
     css = webCSS(a);
   } else {
     css = `*{box-sizing:border-box}body{margin:0;background:#eeedf1;color:${a.theme.text};font-family:Arial,sans-serif}h1,h2,p{margin-top:0}h1{font-size:42px;line-height:1.15;letter-spacing:-1px}h2{font-size:24px}p,li{font-size:20px;line-height:1.55}li{margin-bottom:14px}ul{padding-left:25px}table{width:100%;border-collapse:collapse;font-size:17px;text-align:left}th{background:${a.theme.accent};color:white}td,th{padding:14px;border-bottom:1px solid #dedde3}figure{margin:0}img{max-width:100%;max-height:360px;object-fit:contain}figcaption{font-size:13px;color:#777}.slide{width:1200px;height:675px;background:${a.theme.background};padding:55px 65px;margin:24px auto;position:relative;overflow:hidden}.slide.cover{display:flex;flex-direction:column;justify-content:center}.slide.cover h1{font-size:62px;max-width:900px}.slide .kicker{color:${a.theme.accent};font-size:13px;text-transform:uppercase;letter-spacing:2px;margin-bottom:18px}.slide .subtitle{color:#737180;font-size:24px;max-width:850px}.slide .number{position:absolute;bottom:22px;left:65px;font-size:12px;color:#888}.columns{display:grid;grid-template-columns:1fr 1fr;gap:60px}.columns h2{color:${a.theme.accent}}.image-layout{display:grid;grid-template-columns:1fr 1fr;gap:40px}.document{max-width:850px;margin:30px auto;background:white;padding:75px 80px;min-height:1100px}.document h1{font-size:36px;color:#111}.document h2{font-size:21px;margin-top:30px}.document p,.document li{font-size:16px;line-height:1.65}.document table{font-size:14px}.document .subtitle{color:#666;font-size:17px;margin-bottom:35px}@media print{body{background:white}.slide{margin:0;page-break-after:always}.document{margin:0;padding:0;min-height:0;max-width:none}h2{break-after:avoid}tr,figure{break-inside:avoid}}`;

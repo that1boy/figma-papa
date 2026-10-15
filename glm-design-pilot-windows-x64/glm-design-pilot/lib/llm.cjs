@@ -313,9 +313,17 @@ function onEvent(acc, { event, data, partial }, progress) {
   if (plain(obj.usage)) acc.usage = obj.usage;
   for (const c of Array.isArray(obj.choices) ? obj.choices : []) {
     if (!plain(c) || Number(c.index ?? 0) !== 0) continue;
-    const delta = c.delta || c.message || {};
-    acc.content += parts(delta.content);
-    acc.reasoning += reasoningOf(delta);
+    if (plain(c.delta) || !plain(c.message)) {
+      const delta = plain(c.delta) ? c.delta : {};
+      acc.content += parts(delta.content);
+      acc.reasoning += reasoningOf(delta);
+    } else {
+      // A chunk with a whole `message` instead of a delta. Some gateways end a stream with the
+      // complete answer: when it repeats what the deltas built, it replaces it instead of doubling it.
+      const grow = (have, next) => (have && next.startsWith(have) ? next : have + next);
+      acc.content = grow(acc.content, parts(c.message.content));
+      acc.reasoning = grow(acc.reasoning, reasoningOf(c.message));
+    }
     if (c.finish_reason) acc.finishReason = c.finish_reason;
   }
   if (acc.content.length + acc.reasoning.length > LIMIT) throw fail('too-large', MSG.tooLarge);
@@ -341,9 +349,17 @@ function readWithin(reader, ms) {
 async function readStream(res, progress) {
   const acc = blank();
   if (!res.body) return finishSSE(acc);
-  const parser = sseParser((ev) => onEvent(acc, ev, progress));
+  // Until the first event arrives the raw text is kept: a plain JSON completion labelled
+  // text/event-stream (some gateways always send that type) is then still accepted.
+  let events = 0,
+    raw = '';
+  const parser = sseParser((ev) => (events++, onEvent(acc, ev, progress)));
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  const feed = (text) => {
+    if (!events && raw.length <= LIMIT) raw += text;
+    parser.push(text);
+  };
   let ended = false,
     deadline = 0;
   try {
@@ -359,15 +375,22 @@ async function readStream(res, progress) {
       if (chunk === LATE) break; // finished answer, but the server never closed the stream
       if (chunk.done) {
         ended = true;
-        parser.push(decoder.decode());
+        feed(decoder.decode());
         parser.end();
         break;
       }
-      parser.push(decoder.decode(chunk.value, { stream: true }));
+      feed(decoder.decode(chunk.value, { stream: true }));
       if (parser.stopped) break;
     }
   } finally {
     if (!ended) reader.cancel().catch(() => {});
+  }
+  if (ended && !events && /^\s*\{/.test(raw)) {
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {}
+    if (data !== undefined) return completion(data, progress);
   }
   return finishSSE(acc);
 }
@@ -407,6 +430,10 @@ async function readJSON(res, progress) {
     }
     throw fail('http', MSG.nonJSON, { status: res.status });
   }
+  return completion(data, progress);
+}
+// A parsed non-streaming completion body (or the error object some servers send with 200).
+function completion(data, progress) {
   const err = plain(data) && (data.error || (data.object === 'error' ? data : null));
   if (err && !Array.isArray(data.choices)) throw errorEvent(err);
   const choice = plain(data) && Array.isArray(data.choices) ? data.choices[0] : null;

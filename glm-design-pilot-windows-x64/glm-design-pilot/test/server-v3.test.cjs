@@ -503,3 +503,84 @@ test('GLM mode: lint metrics, directions, element edits (sanitized, saturated, a
   await inflight;
   hold = null;
 });
+
+test('.env templates document every GLM_* setting from the spec, and the Windows template keeps its GENERATE_ placeholders', async () => {
+  const { parseEnv } = require('node:util');
+  const M = require('../lib/model.cjs');
+  const spec = await fs.readFile(path.join(__dirname, '..', 'docs', 'ENGINE-SPEC.md'), 'utf8');
+  const section = spec.slice(spec.indexOf('## 1. GLM client'), spec.indexOf('## 2.'));
+  const fromSpec = [...new Set([...section.matchAll(/`(GLM_[A-Z_]+)`/g)].map((m) => m[1]))];
+  assert.ok(fromSpec.length >= 12, fromSpec.join(' '));
+  const all = [...new Set(['GLM_BASE_URL', 'GLM_MODEL', 'GLM_API_KEY', 'GLM_REASONING_EFFORT', 'GLM_MAX_TOKENS', 'GLM_TIMEOUT_MS', 'GLM_JSON_MODE', 'GLM_EXTRA_BODY', ...fromSpec])];
+  for (const file of ['.env.example', '.env.windows.example']) {
+    const text = await fs.readFile(path.join(__dirname, '..', file), 'utf8');
+    const env = parseEnv(text);
+    for (const name of all) assert.ok(Object.hasOwn(env, name), `${file} documents ${name}`);
+    // The documented values are valid as written, in GLM mode too.
+    const cfg = M.configFromEnv({ ...env, MODEL_MODE: 'glm', GLM_BASE_URL: 'http://model.internal:8000/v1' });
+    assert.deepEqual([cfg.pipeline, cfg.parallel, cfg.stream, cfg.vision, cfg.maxImages, cfg.retries, cfg.structured], ['staged', 3, true, 'auto', 8, 2, false], file);
+    assert.deepEqual(cfg.effort, { plan: 'high', build: 'high', review: 'low', edit: 'high', repair: 'high', test: 'low' }, file);
+    if (file === '.env.windows.example') {
+      // scripts/windows.cjs --setup (01-configure.cmd) replaces exactly these placeholders.
+      for (const key of ['APP_PASSWORD', 'SESSION_SECRET', 'RENDER_TOKEN']) assert.equal(env[key], `GENERATE_${key}`);
+      assert.match(await fs.readFile(path.join(__dirname, '..', 'scripts', 'windows.cjs'), 'utf8'), /for \(const key of \['APP_PASSWORD', 'SESSION_SECRET', 'RENDER_TOKEN'\]\)\s+template = template\.replace\(`GENERATE_\$\{key\}`/);
+    }
+  }
+});
+
+test('GLM mode: staged progress JSON carries screen counts and streamed characters, written at most once per second', async (t) => {
+  const dir = await tmp('forma-v3-progress-');
+  const plan = { title: 'Desk', summary: 's', preset: 'neutral', screens: ['Overview', 'Requests', 'Settings'].map((name) => ({ id: name.toLowerCase(), name })) };
+  const screen = (id) => `<forma-screen id="${id}" name="${id}"><main class="page"><h1>${id}</h1>${plan.screens.map((s) => `<button class="btn" data-action="navigate" data-target="${s.id}">${s.name}</button>`).join('')}</main></forma-screen>`;
+  // Streams answers in chunks like a reasoning model: the plan and two screens quickly, the
+  // last screen over three seconds (so its streamed-character updates reach the job row).
+  const mock = http.createServer(async (req, res) => {
+    let raw = '';
+    for await (const b of req) raw += b;
+    const body = JSON.parse(raw);
+    const id = body.messages[0].content.startsWith('You are the design lead') ? null : /Build screen "([^"]+)"/.exec([].concat(body.messages[1].content).map((c) => c.text || c).join('\n'))[1];
+    const text = id ? screen(id) : JSON.stringify(plan);
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    const [chunks, pause] = id === 'settings' ? [30, 100] : [4, 40];
+    const size = Math.ceil(text.length / chunks);
+    for (let i = 0; i < chunks; i++) {
+      if (res.destroyed) return;
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { reasoning_content: 'x'.repeat(400), content: text.slice(i * size, (i + 1) * size) } }] })}\n\n`);
+      await delay(pause);
+    }
+    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 20 } })}\n\n`);
+    res.end('data: [DONE]\n\n');
+  });
+  await new Promise((r) => mock.listen(0, '127.0.0.1', r));
+  let app;
+  t.after(async () => {
+    await stop(app);
+    mock.closeAllConnections();
+    await new Promise((r) => mock.close(r));
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  app = await start('server.cjs', { APP_PASSWORD: PASSWORD, MODEL_MODE: 'glm', DATA_DIR: dir, GLM_BASE_URL: `http://127.0.0.1:${mock.address().port}/v1`, GLM_RETRIES: '0', RENDER_URL: '', HOST: '127.0.0.1' });
+  const api = await client(app.url);
+  const pid = (await api('/projects', 'POST', { kind: 'web', title: 'Progress' })).data.id;
+  const jid = (await api(`/projects/${pid}/generate`, 'POST', { prompt: 'Build the desk.', review: false })).data.id;
+  const writes = new Map(); // updated timestamp -> progress
+  let job;
+  for (;;) {
+    job = (await api('/jobs/' + jid)).data;
+    if (job.status === 'running' && job.progress.phase) writes.set(job.updated, job.progress);
+    if (!['queued', 'running'].includes(job.status)) break;
+    await delay(10);
+  }
+  assert.equal(job.status, 'complete', job.error);
+  const generating = [...writes].filter(([, p]) => p.phase === 'generating').sort(([a], [b]) => a.localeCompare(b));
+  assert.ok(generating.length >= 3, JSON.stringify(generating));
+  for (let i = 1; i < generating.length; i++) {
+    const gap = Date.parse(generating[i][0]) - Date.parse(generating[i - 1][0]);
+    assert.ok(gap >= 950, `progress writes ${gap} ms apart: ${generating[i - 1][1].label} -> ${generating[i][1].label}`);
+  }
+  for (const [, p] of generating) assert.deepEqual(Object.keys(p), ['phase', 'label', 'done', 'total', 'chars', 'calls']);
+  assert.ok(generating.some(([, p]) => Number.isInteger(p.chars) && p.chars > 0), "streamed characters are reported: " + JSON.stringify(generating));
+  assert.ok(generating.some(([, p]) => p.total === 3 && p.done >= 2), 'screen counts are reported: ' + generating.map(([, p]) => p.label).join(' | '));
+  assert.ok(generating.some(([, p]) => p.calls >= 1));
+  assert.deepEqual(job.progress, { phase: 'complete', label: 'Ready for your review' });
+});

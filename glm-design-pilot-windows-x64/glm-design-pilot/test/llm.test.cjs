@@ -375,6 +375,33 @@ test('an SSE body served with a JSON content type is still parsed', async (t) =>
   assert.deepEqual(r.usage, { inputTokens: 3, outputTokens: 4, reasoningTokens: 0 });
 });
 
+test('a plain JSON completion labelled text/event-stream is accepted, in any chunking', async (t) => {
+  const json = JSON.stringify(completion('labelled as a stream', { usage: { prompt_tokens: 5, completion_tokens: 6 } }), null, 2);
+  const s = await serve((req, res, body, n) => writeSSE(res, n === 3 ? JSON.stringify({ error: { message: 'model not found', code: 404 } }) : json, { size: n === 2 ? 7 : 1 << 20 }));
+  t.after(s.close);
+  for (let i = 0; i < 2; i++) {
+    const r = await L.chat(cfgFor(s.base), MSGS, { sleep: noSleep() });
+    assert.equal(r.text, 'labelled as a stream');
+    assert.deepEqual(r.usage, { inputTokens: 5, outputTokens: 6, reasoningTokens: 0 });
+    assert.equal(r.retries, 0, 'not mistaken for a dropped connection');
+  }
+  await assert.rejects(L.chat(cfgFor(s.base), MSGS, { sleep: noSleep() }), { code: 'http', status: 404 });
+  assert.equal(s.calls.length, 3);
+});
+
+test('a stream that ends with the complete message after its deltas does not double the answer', async (t) => {
+  const full = { choices: [{ index: 0, message: { role: 'assistant', content: 'Hello world', reasoning_content: 'Think' }, finish_reason: 'stop' }] };
+  const parts = { choices: [{ index: 0, message: { content: ' world' } }] };
+  const s = await serve((req, res, body, n) =>
+    writeSSE(res, ssePayload(n === 1 ? [chunk({ reasoning_content: 'Think' }), chunk({ content: 'Hello' }), chunk({ content: ' world' }), full, 'data: [DONE]'] : [{ choices: [{ index: 0, message: { content: 'Hello' } }] }, parts, chunk({}, 'stop'), 'data: [DONE]'])),
+  );
+  t.after(s.close);
+  const r = await L.chat(cfgFor(s.base), MSGS, {});
+  assert.equal(r.text, 'Hello world');
+  assert.equal(r.reasoning, 'Think');
+  assert.equal((await L.chat(cfgFor(s.base), MSGS, {})).text, 'Hello world', 'message-shaped incremental chunks still append');
+});
+
 test('a stream that ends without [DONE] or finish_reason is a dropped connection and is retried', async (t) => {
   const s = await serve((req, res, body, n) => writeSSE(res, n === 1 ? ssePayload([chunk({ content: 'partial' })]) : simpleStream('complete')));
   t.after(s.close);
