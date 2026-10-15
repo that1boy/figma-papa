@@ -59,7 +59,8 @@ async function sourceDocx() {
     });
     const api = await client(app.url, PASSWORD);
     browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}) });
-    const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, acceptDownloads: true });
+    // Wide enough that the 1280 px canvas at 100% fits without scrolling the canvas sideways.
+    const context = await browser.newContext({ viewport: { width: 2000, height: 1100 }, acceptDownloads: true });
     page = await context.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -67,6 +68,7 @@ async function sourceDocx() {
     const frame = page.frameLocator('#preview-frame');
     // The preview's runtime script follows the (large, font-inlining) page body: wait for it before clicking.
     const frameReady = () => frame.locator('body').evaluate(() => new Promise((r) => { const t = setInterval(() => typeof window.formaNavigate === 'function' && (clearInterval(t), r()), 25); }));
+    let liveShots = 0;
     const shot = async (name) => { const file = path.join(results, name + '.png'); await page.screenshot({ path: file }); shots.push(file); };
     // Waits for the active job to start and finish while sampling the live label.
     async function runJob(timeout = 240000) {
@@ -77,7 +79,7 @@ async function sourceDocx() {
         if (Date.now() > end) throw new Error('Job did not finish. Labels: ' + labels.join(' | '));
         const label = (await page.locator('#live-label').textContent().catch(() => '')) || '';
         if (label && labels.at(-1) !== label) labels.push(label);
-        if (!midShot && /Built|Building/.test(label)) { midShot = true; labels.shot = true; await shot('02-live-progress-' + shots.length); }
+        if (!midShot && /Built|Building/.test(label)) { midShot = true; await shot(`02-live-progress-${++liveShots}`); }
         await page.waitForTimeout(120);
       }
       return labels;
@@ -255,6 +257,9 @@ async function sourceDocx() {
     const beforeEdit = await revisionOf(p.current.parent_id);
     for (const i of [1, 2]) assert.equal(p.current.artifact.screens[i].html, beforeEdit.artifact.screens[i].html, 'element edit leaves other screens alone');
     assert.match(await page.locator('#chat-history').innerText(), /GLM ELEMENT EDIT/);
+    // The strip still knows which direction the saved edit builds on.
+    await page.locator('#directions-strip .direction-card.is-current').filter({ hasText: 'Bold and expressive' }).waitFor();
+    assert.equal(await page.locator('#directions-strip .direction-card.is-current [data-direction-use]').count(), 0);
 
     // ---- tweaks ----
     step('tweaks');
@@ -348,6 +353,9 @@ async function sourceDocx() {
     assert.equal(p.current.artifact.kind, 'document');
     assert.equal(p.current.metrics.pipeline.mode, 'single');
     assert(mock.requests.some((r) => r.stage === 'document' && /Source document "/.test(r.text)));
+    // Document previews use the canvas height instead of collapsing to the 500 px minimum.
+    const [frameHeight, canvasHeight] = await page.evaluate(() => [document.querySelector('#preview-frame').getBoundingClientRect().height, document.querySelector('#canvas-center').clientHeight]);
+    assert(frameHeight > canvasHeight * 0.8, `document preview fills the canvas (${Math.round(frameHeight)} of ${canvasHeight} px)`);
     await shot('10-document');
     const docx = await JSZip.loadAsync(await download('docx', 'service-desk-summary.docx'));
     const xml = await docx.file('word/document.xml').async('string');
@@ -355,8 +363,11 @@ async function sourceDocx() {
     assert.match(xml, /REQ-307 Payroll export fails/);
 
     assert.deepEqual(errors, []);
+    const findings = (r) => (r.metrics.lint || []).filter((f) => f.severity !== 'info').map((f) => `${f.severity} ${f.rule} ${f.screen}/${f.viewport}: ${f.message}`);
+    const lintNotes = { generated: findings(generated), revised: findings(revised) };
+    console.log('  lint (non-info):', JSON.stringify(lintNotes));
     const counts = mock.requests.reduce((m, r) => ((m[r.stage] = (m[r.stage] || 0) + 1), m), {});
-    await fs.writeFile(path.join(results, 'glm-e2e-summary.json'), JSON.stringify({ steps, labels, lintScore: score, calls: stages, mockRequests: counts, screenshots: shots }, null, 2));
+    await fs.writeFile(path.join(results, 'glm-e2e-summary.json'), JSON.stringify({ steps, labels, lintScore: score, lintNotes, calls: stages, mockRequests: counts, screenshots: shots }, null, 2));
     console.log('GLM e2e passed:', JSON.stringify(counts), `in ${Math.round((Date.now() - t0) / 1000)}s`);
     console.log('Evidence: ' + results);
   } catch (e) {

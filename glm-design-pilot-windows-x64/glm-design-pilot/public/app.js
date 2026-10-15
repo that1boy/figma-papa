@@ -744,8 +744,9 @@ function drawDirections() {
     host.innerHTML = '';
     return;
   }
-  const p = state.project, chosen = new Set([p.current_id]);
-  if (p.current?.origin === 'restore' && p.current.parent_id) chosen.add(p.current.parent_id);
+  // The direction the current revision descends from (through restores, saved edits and revisions) is in use.
+  const p = state.project, chosen = new Set([p.current_id]), ids = new Set(set.map((v) => v.id)), byId = new Map(p.revisions.map((v) => [v.id, v]));
+  for (let v = byId.get(p.current_id), n = 0; v && n < 500; v = byId.get(v.parent_id), n++) if (ids.has(v.id)) { chosen.add(v.id); break; }
   host.innerHTML = `<div class="directions-head"><span class="directions-title">${icon('layers')}Directions</span><small>Compare the variants, then keep one. Each is a saved revision.</small></div><div class="direction-cards">${set.map((v, i) => directionCard(v, i, chosen)).join('')}</div>`;
   const missing = set.filter((v) => !state.dirCache.has(v.id));
   if (!missing.length) return;
@@ -952,7 +953,7 @@ function drawChecks() {
       : '';
   const pl = m.pipeline;
   const pipeline = pl?.mode
-    ? `<p class="pipeline-line">${icon('layers')}<span>Pipeline: ${esc(pl.mode)}${pl.screens ? ` · ${plural(pl.screens, 'screen')}` : ''}${pl.preset ? ` · ${esc(presetName(pl.preset))} preset` : ''}${pl.direction ? ` · ${esc(pl.direction)}` : ''}${Array.isArray(pl.changed) ? ` · changed ${esc(changedSummary(pl.changed))}` : ''}${m.model ? ` · ${esc(m.model)}` : ''}</span></p>`
+    ? `<p class="pipeline-line">${icon('layers')}<span>Pipeline: ${esc(pl.mode)}${pl.screens ? ` · ${plural(pl.screens, 'screen')}` : ''}${pl.preset ? ` · ${esc(presetName(pl.preset))} preset` : ''}${pl.direction ? ` · ${esc(pl.direction)}` : ''}${Array.isArray(pl.changed) ? ` · changed ${esc(changedSummary(pl.changed))}` : ''}${Array.isArray(pl.correction?.changed) ? ` · correction changed ${esc(changedSummary(pl.correction.changed))}` : ''}${m.model ? ` · ${esc(m.model)}` : ''}</span></p>`
     : '';
   const ls = m.lintScore;
   $('checks-panel').innerHTML =

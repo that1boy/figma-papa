@@ -247,7 +247,7 @@ function revise(text) {
   }
   const task = /\nTask: ([\s\S]*?)\nReturn only the changed blocks\./.exec(text)?.[1] || '';
   const target = screens.find((s) => new RegExp(`\\b${s.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(task)) || screens[0];
-  const callout = `<div class="alert alert-warning" role="status"><i data-icon="triangle-alert"></i><div><p class="alert-title">${f.breaching} requests are breaching SLA</p><p>Each has waited longer than the ${f.sla} business hour first-response target. Start with the oldest.</p></div></div>`;
+  const callout = `<div class="alert alert-warning" role="status"><i data-icon="triangle-alert"></i><div><p class="alert-title">${f.breaching} requests are breaching SLA</p><p>Each is past the ${f.sla} business hour first-response target.</p></div></div>`;
   const marker = target.html.includes('<section id="open-panel"') ? '<section id="open-panel"' : '<section';
   return `<forma-screen id="${target.id}" name="${esc(target.name)}">\n${insertBefore(target.html, marker, callout)}\n</forma-screen>\n<forma-meta>{"summary":"Agents see open work and SLA risk, triage the request queue with an SLA callout, and act on a single request."}</forma-meta>`;
 }

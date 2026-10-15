@@ -192,7 +192,7 @@ window.FormaStudio = (() => {
     for (const id of ['desktop-view', 'mobile-view', 'tablet-view', 'custom-size', 'canvas-zoom']) $(id).hidden = native;
     $('native-view').textContent = native ? 'Canvas' : 'Rendered views';
     $('frame-wrap').hidden = native; $('native-pages').hidden = !native;
-    $('frame-wrap').classList.remove('mobile');
+    $('frame-wrap').classList.remove('mobile'); $('frame-wrap').style.height = '';
     if (pid !== p.id || rid !== r.id) {
       abortGLM(); pid = p.id; rid = r.id; draft = copy(r.artifact); base = copy(draft); undo = []; redo = []; notes = []; dirty = false;
       live = blankLive(); posted = new Set(); reselect = null; inserted = null; glmMessage = null; glmText = '';
@@ -208,6 +208,8 @@ window.FormaStudio = (() => {
     $('studio-bar').hidden = true; $('screen-rail').hidden = true; $('design-inspector').hidden = true;
     for (const id of ['tablet-view', 'custom-size', 'canvas-zoom']) $(id).hidden = true;
     const f = $('preview-frame'); f.removeAttribute('srcdoc'); f.style.width = ''; f.style.height = ''; f.style.transform = ''; device.style.width = '100%'; device.style.height = '100%'; frameLabel.textContent = '';
+    // Slide and document previews fill the canvas: the wrapper needs a definite height for device height:100%.
+    $('frame-wrap').style.height = '100%';
   }
 
   // ---- rail: screens and layers ----

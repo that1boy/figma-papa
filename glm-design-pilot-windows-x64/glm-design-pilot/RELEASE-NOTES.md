@@ -1,4 +1,52 @@
-# Forma 0.1.3
+# Forma release notes
+
+## 0.3.0 — 15 October 2026
+
+Generation is rebuilt around a fast, smaller model: the organisation's GLM-5.3-Flash. The aim is output close to Claude Design while every call stays on the internal endpoint and the app works offline.
+
+**Design engine**
+- A design kit the model composes from instead of writing CSS from scratch: a Tailwind-compatible utility engine (CSS generated on demand for the classes a design uses), a token-driven component library, 10 curated design-system presets, 11 bundled open-source font families (embedded in every page, so previews, exports and renders look the same everywhere), 1,890 Lucide icons via `<i data-icon>`, accessible SVG charts from `data-chart` JSON (bar, horizontal bar, stacked bar, line, area, donut, pie, sparkline), and sanitized inline SVG.
+- A staged pipeline for web projects: plan (JSON) → first screen with shared CSS → remaining screens in parallel → assemble and validate. Screens are raw HTML in tagged blocks rather than escaped JSON strings; forbidden CSS is removed deterministically instead of costing a repair call. `GLM_PIPELINE=single` keeps the 0.2 one-call behaviour.
+- Revisions return only the screens that change; unchanged screens stay byte-identical. A review correction is applied the same way.
+- Directions: 2–4 different variants in parallel (calm, bold, dense, editorial), each saved as a revision; pick one with **Use this direction**.
+- GLM element edits: select an element and describe a change; only that element is sent and replaced, as an undoable draft change.
+- Tweak sliders for layout knobs proposed in the plan and for core tokens, applied live in the preview.
+- Deterministic design lint (static and in the browser at desktop, tablet and mobile): contrast, small text, tap targets, overflow, clipped and overlapping text, alt text, unnamed controls, heading order, broken navigation, unknown classes and icons. Lint errors are merged into the review so the correction pass fixes them; the score and findings appear in chat and Checks.
+
+**GLM client**
+- Streaming with live progress, retries with backoff for network errors and HTTP 429/5xx, `<think>` stripping for misconfigured reasoning parsers, tolerant JSON extraction, per-stage `reasoning_effort` (review defaults to `low`), image caps, and an automatic text-only fallback when the endpoint rejects images (`GLM_VISION=auto`). Every call is recorded with stage, duration, tokens, retries and whether images were dropped.
+- System prompts contain no project data, so an inference server's prefix cache can reuse them.
+
+**Inputs and styles**
+- Up to 6 reference images (PNG, JPEG, WebP) and up to 6 source documents (DOCX, PPTX, XLSX, CSV, TSV, TXT, Markdown, HTML, JSON; PDF with Poppler), extracted with zip-bomb and XML-entity protection and passed to GLM as facts.
+- A preset can be chosen when creating a project. Design tokens import from CSS, W3C/Style Dictionary token JSON or a Tailwind config. 0.2 design systems gain the new tokens automatically.
+
+**Workspace and studio**
+- Chat thread with what each generation changed, live progress, retry for failed jobs, suggestion chips and Ctrl/Cmd+Enter.
+- Sources panel, directions picker, tweaks panel, token import, kit-based components, and a Checks tab with the lint report and a model-calls table.
+- Rebuilt curated starters and demo fixtures on the kit.
+
+**Slides and documents**
+- New slide layouts: section, quote, stats, timeline, cards, chart and agenda, with geometry shared by preview and PPTX, native editable PowerPoint charts and recolourable icon shapes, design-system office fonts and contrast-checked header text. Tables now appear only on table slides in both preview and PPTX.
+- DOCX: Caption style defined, line breaks kept, contrast-checked table headers.
+
+**Server and operations**
+- Database migration adds job kind/options/progress/result IDs and a source documents table. All inserts use named columns.
+- New routes for sources, element edits, design-token import and directions; render requests are serialized to the renderer's limit and retried once on HTTP 429.
+- `scripts/package-windows.cjs` builds the portable Windows ZIP (Node.js 24.18.0 verified against nodejs.org checksums, production dependencies, SHA256SUMS). `scripts/checksums.cjs` regenerates or checks program-file hashes. No npm dependencies were added.
+
+**Verification (this environment, Linux, Node.js 24.18.0, Chromium)**
+- `npm test`: 329 tests passed.
+- `test/browser.cjs` and `test/studio-browser.cjs`: passed (demo mode, all three formats, all 11 starter screens at three widths).
+- `npm run test:glm-e2e`: passed. A scripted OpenAI-compatible mock that streams reasoning and follows Forma's prompts drives the full GLM-mode flow in a real browser: create with preset, reference image and DOCX source; staged generation with review and correction; 3 directions; a GLM element edit; live tweaks; a changed-screens revision (unchanged screens byte-identical); HTML, ZIP and JSON exports; a document project.
+- Hostile-input probes (SVG script and event handlers, `javascript:` and `data:` URLs, mXSS nesting, chart and icon attribute injection, CSS and tweak injection) were neutralised.
+- The Windows package was built and its extracted copy started and served the app.
+
+**Not verified, and known limits**
+- Real GLM-5.3-Flash output quality, latency and image handling have **not** been measured; the mock only proves the plumbing. Run the evaluation in `evaluation/README.md` with real briefs.
+- Windows itself, Docker and LibreOffice/Poppler rendering of every new slide layout were not run end to end here (PPTX output was spot-checked through LibreOffice).
+- When a project has an explicit preset, directions share its palette and differ mainly in layout, density and emphasis.
+- One shared password and workspace; no SSO, per-user attribution or live collaboration.
 
 ## 0.2.0 — 14 October 2026
 

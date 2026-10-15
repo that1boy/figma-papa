@@ -363,7 +363,13 @@ async function reviseWeb(cfg, project, prompt, current, ctx) {
     ]));
     result = applyRevision(current, raw, project);
   }
-  if (ctx.metrics) ctx.metrics.pipeline = { mode: 'revision', changed: result.changed };
+  if (ctx.metrics) {
+    const info = { mode: 'revision', changed: result.changed };
+    // A review correction runs as a revision inside the same job: keep the
+    // original build summary and record the correction beside it.
+    if (ctx.metrics.pipeline?.mode) ctx.metrics.pipeline = { ...ctx.metrics.pipeline, correction: info };
+    else ctx.metrics.pipeline = info;
+  }
   return result.artifact;
 }
 
