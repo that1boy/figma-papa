@@ -4,7 +4,7 @@ services:
     build:
       context: .
       target: app
-    image: glm-design-pilot-app:0.1.0
+    image: glm-design-pilot-app:0.3.0
     env_file: .env
     environment:
       DATA_DIR: /app/data
@@ -40,7 +40,7 @@ services:
     build:
       context: .
       target: renderer
-    image: glm-design-pilot-renderer:0.1.0
+    image: glm-design-pilot-renderer:0.3.0
     environment:
       RENDER_TOKEN: ${RENDER_TOKEN:?Set RENDER_TOKEN in .env}
       RENDER_PORT: 8081
