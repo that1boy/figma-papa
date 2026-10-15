@@ -14,7 +14,7 @@ const LEFT = 0.7, WIDTH = 11.9, BOTTOM = 6.65, LH = 1.25;
 
 function slideLayout(s) {
   if (s.layout === 'section') {
-    const title = { x: LEFT, y: 1.55, w: 9.4, h: 2.75, fontSize: 44 };
+    const title = { x: LEFT, y: 1.55, w: 9.4, h: 2.75, fontSize: fit(s.title, 9.4, 2.75, 46, 30, true).pt };
     const subtitle = { x: LEFT, y: 4.5, w: 9.4, h: 0.65, fontSize: 22 };
     const top = s.subtitle ? 5.33 : 4.5;
     return { title, subtitle, content: { x: LEFT, y: top, w: 9.4, h: BOTTOM - top }, cover: false, section: true };
@@ -112,66 +112,77 @@ function intro(s, C, parts) {
   return { y: C.y + f.h + 0.32, fits: f.fits };
 }
 const columns = (n, w, gap) => (w - gap * (n - 1)) / n;
+// Several paragraphs in one text box (heading + detail), so both renderers flow them naturally.
+const stack = (x, y, w, h, runs, more = {}) => ({ type: 'text', x: round(x), y: round(y), w: round(w), h: round(h), runs: runs.filter((r) => r.text), color: 'text', ...more });
+const stackHeight = (runs, w) => runs.filter((r) => r.text).reduce((sum, r, i) => sum + (i ? r.gap || 0 : 0) + textHeight(r.text, w, r.pt, r.bold), 0);
+// Optical centring: a short block sits a little above the middle of the content area.
+function settle(parts, C, s) {
+  if (s.body) return; // an intro line anchors the block under the title
+  const bottom = Math.max(...parts.map((p) => p.y + p.h)), dy = round(Math.max(0, (C.y + C.h - bottom) * 0.4));
+  if (dy > 0.05) for (const p of parts) p.y = round(p.y + dy);
+}
 function stats(s, C, parts) {
   const head = intro(s, C, parts), n = s.stats.length, gap = 0.3, cw = columns(n, C.w, gap), pad = 0.34, iw = cw - pad * 2;
   const avail = C.y + C.h - head.y;
   const maxValue = n === 4 ? 46 : 54, labelPt = n === 4 ? 16 : 18;
   const longest = Math.max(...s.stats.map((x) => x.value.length));
-  const valuePt = Math.max(26, Math.min(maxValue, Math.floor((iw * 72) / (Math.max(2, longest) * 0.62))));
-  const valueH = (valuePt * 1.18) / 72;
-  let detailPt = n === 4 ? 13 : 14, fits = head.fits;
-  const need = (dp) => Math.max(...s.stats.map((x) => textHeight(x.label, iw, labelPt, true) + (x.detail ? 0.1 + textHeight(x.detail, iw, dp) : 0)));
-  while (detailPt > 11 && pad * 2 + 0.2 + valueH + 0.14 + need(detailPt) > avail) detailPt--;
-  const cardH = Math.min(avail, Math.max(2.3, pad * 2 + 0.2 + valueH + 0.14 + need(detailPt)));
-  if (pad * 2 + 0.2 + valueH + 0.14 + need(detailPt) > avail + 0.01) fits = false;
+  const valuePt = Math.max(26, Math.min(maxValue, Math.floor((iw * 72) / (Math.max(2, longest) * 0.66))));
+  const valueH = (valuePt * 1.18) / 72, fixed = pad * 2 + 0.2 + valueH + 0.14;
+  let detailPt = n === 4 ? 13 : 14;
+  const runs = (x, dp) => [{ text: x.label, pt: labelPt, bold: true, tag: 'h2' }, { text: x.detail, pt: dp, color: 'muted', gap: 0.1, tag: 'p' }];
+  const need = (dp) => Math.max(...s.stats.map((x) => stackHeight(runs(x, dp), iw)));
+  while (detailPt > 11 && fixed + need(detailPt) > avail) detailPt--;
+  const fits = head.fits && fixed + need(detailPt) <= avail + 0.01;
+  const cardH = Math.min(avail, Math.max(2.1, fixed + need(detailPt) + 0.08));
   s.stats.forEach((st, i) => {
-    const x = C.x + i * (cw + gap), y = head.y;
+    const x = C.x + i * (cw + gap), y = head.y, vy = y + pad + 0.2;
     parts.push(rect(x, y, cw, cardH, 'panel', { radius: 0.14, role: 'card' }));
     parts.push(rect(x + pad, y + pad, 0.42, 0.055, 'accent', { role: 'rule' }));
-    const vy = y + pad + 0.2;
-    parts.push(text(x + pad, vy, iw, valueH, st.value, valuePt, { color: 'accentText', bold: true, font: 'heading', role: 'stat-value', nowrap: true }));
-    const lh = textHeight(st.label, iw, labelPt, true), ly = vy + valueH + 0.14;
-    parts.push(text(x + pad, ly, iw, lh, st.label, labelPt, { bold: true, role: 'stat-label', tag: 'h2' }));
-    if (st.detail) parts.push(text(x + pad, ly + lh + 0.1, iw, Math.max(0.2, y + cardH - pad - (ly + lh + 0.1)), st.detail, detailPt, { color: 'muted', role: 'stat-detail', tag: 'p' }));
+    parts.push(text(x + pad, vy, iw, valueH, st.value, valuePt, { color: 'accentText', bold: true, font: 'heading', role: 'stat-value', nowrap: true, spacing: -Math.round(valuePt * 0.2) / 10 }));
+    parts.push(stack(x + pad, vy + valueH + 0.14, iw, Math.max(0.3, y + cardH - pad - (vy + valueH + 0.14)), runs(st, detailPt), { role: 'stat-text' }));
   });
+  settle(parts, C, s);
   return fits;
 }
 function timeline(s, C, parts) {
-  const head = intro(s, C, parts), n = s.steps.length, gap = 0.3, cw = columns(n, C.w, gap);
-  const ty = head.y + 0.62, dot = 0.26, top = ty + 0.36, avail = C.y + C.h - top;
-  let titlePt = n <= 4 ? 20 : n === 5 ? 18 : 16, detailPt = n <= 4 ? 15 : 13, fits = head.fits;
-  const need = () => Math.max(...s.steps.map((st) => textHeight(st.title, cw - 0.1, titlePt, true) + (st.detail ? 0.1 + textHeight(st.detail, cw - 0.1, detailPt) : 0)));
+  const head = intro(s, C, parts), n = s.steps.length, gap = 0.3, cw = columns(n, C.w, gap), tw = cw - 0.1;
+  const labels = s.steps.map((st, i) => (st.label || String(i + 1).padStart(2, '0')).toUpperCase());
+  const labelH = Math.max(...labels.map((l) => textHeight(l, cw, 12, true)));
+  const ty = head.y + labelH + 0.3, dot = 0.26, top = ty + 0.38, avail = C.y + C.h - top;
+  let titlePt = n <= 4 ? 20 : n === 5 ? 18 : 16, detailPt = n <= 4 ? 15 : 13;
+  const runs = (st) => [{ text: st.title, pt: titlePt, bold: true, tag: 'h2' }, { text: st.detail, pt: detailPt, color: 'muted', gap: 0.1, tag: 'p' }];
+  const need = () => Math.max(...s.steps.map((st) => stackHeight(runs(st), tw)));
   while (need() > avail && (titlePt > 13 || detailPt > 11)) { if (detailPt > 11) detailPt--; if (titlePt > 13 && need() > avail) titlePt--; }
-  if (need() > avail + 0.01) fits = false;
+  const fits = head.fits && need() <= avail + 0.01, h = Math.min(avail, need() + 0.15);
   parts.push(rect(C.x, ty - 0.015, C.w, 0.03, 'line', { role: 'track' }));
   s.steps.forEach((st, i) => {
     const x = C.x + i * (cw + gap);
-    parts.push(text(x, head.y, cw, 0.34, st.label || String(i + 1).padStart(2, '0'), 12, { color: 'accentText', bold: true, caps: true, spacing: 1, role: 'step-label' }));
+    parts.push(text(x, head.y, cw, labelH, labels[i], 12, { color: 'accentText', bold: true, spacing: 1, role: 'step-label' }));
     parts.push({ type: 'ellipse', x: round(x), y: round(ty - dot / 2), w: dot, h: dot, fill: 'accent', line: 'background', lineWidth: 3, role: 'dot' });
-    const th = textHeight(st.title, cw - 0.1, titlePt, true);
-    parts.push(text(x, top, cw - 0.1, th, st.title, titlePt, { bold: true, role: 'step-title', tag: 'h2' }));
-    if (st.detail) parts.push(text(x, top + th + 0.1, cw - 0.1, Math.max(0.2, C.y + C.h - (top + th + 0.1)), st.detail, detailPt, { color: 'muted', role: 'step-detail', tag: 'p' }));
+    parts.push(stack(x, top, tw, h, runs(st), { role: 'step-text' }));
   });
+  settle(parts, C, s);
   return fits;
 }
 function cards(s, C, parts) {
   const head = intro(s, C, parts), n = s.cards.length, gap = 0.3, cw = columns(n, C.w, gap), pad = 0.36, iw = cw - pad * 2, tile = 0.66;
-  const avail = C.y + C.h - head.y;
-  let titlePt = n === 4 ? 18 : 20, bodyPt = n === 4 ? 14 : 15, fits = head.fits;
-  const need = () => pad * 2 + tile + 0.28 + Math.max(...s.cards.map((c) => textHeight(c.title, iw, titlePt, true) + 0.12 + textHeight(c.body, iw, bodyPt)));
+  const avail = C.y + C.h - head.y, fixed = pad * 2 + tile + 0.28;
+  let titlePt = n === 4 ? 18 : 20, bodyPt = n === 4 ? 14 : 15;
+  const runs = (c) => [{ text: c.title, pt: titlePt, bold: true, tag: 'h2' }, { text: c.body, pt: bodyPt, color: 'muted', gap: 0.12, tag: 'p' }];
+  const need = () => fixed + Math.max(...s.cards.map((c) => stackHeight(runs(c), iw)));
   while (need() > avail && (titlePt > 14 || bodyPt > 11)) { if (bodyPt > 11) bodyPt--; if (titlePt > 14 && need() > avail) titlePt--; }
-  if (need() > avail + 0.01) fits = false;
-  const cardH = Math.min(avail, Math.max(2.6, need()));
+  const fits = head.fits && need() <= avail + 0.01;
+  const cardH = Math.min(avail, Math.max(2.4, need() + 0.08));
   s.cards.forEach((c, i) => {
     const x = C.x + i * (cw + gap), y = head.y;
     parts.push(rect(x, y, cw, cardH, 'panel', { radius: 0.16, role: 'card' }));
     parts.push(rect(x + pad, y + pad, tile, tile, 'soft', { radius: 0.14, role: 'tile' }));
     if (c.icon) parts.push({ type: 'icon', x: round(x + pad + 0.16), y: round(y + pad + 0.16), w: tile - 0.32, h: tile - 0.32, name: c.icon, color: 'accentText', role: 'icon' });
     else parts.push(text(x + pad, y + pad, tile, tile, String(i + 1).padStart(2, '0'), 17, { color: 'accentText', bold: true, align: 'center', valign: 'middle', role: 'tile-number' }));
-    const ty = y + pad + tile + 0.28, th = textHeight(c.title, iw, titlePt, true);
-    parts.push(text(x + pad, ty, iw, th, c.title, titlePt, { bold: true, role: 'card-title', tag: 'h2' }));
-    parts.push(text(x + pad, ty + th + 0.12, iw, Math.max(0.2, y + cardH - pad - (ty + th + 0.12)), c.body, bodyPt, { color: 'muted', role: 'card-body', tag: 'p' }));
+    const ty = y + pad + tile + 0.28;
+    parts.push(stack(x + pad, ty, iw, Math.max(0.3, y + cardH - pad - ty), runs(c), { role: 'card-text' }));
   });
+  settle(parts, C, s);
   return fits;
 }
 function chart(s, C, parts) {
@@ -200,7 +211,7 @@ function quote(s, C, parts) {
   const x = C.x + 1.05, w = C.w - 1.05 - 0.55, attr = s.attribution ? s.attribution.replace(/^[\s—–-]+/, '') : '';
   const f = fit(s.quote, w, C.h - (attr ? 0.8 : 0.1), 34, 18, false, 1.3);
   const block = f.h + (attr ? 0.72 : 0), y = C.y + Math.max(0.12, (C.h - block) / 2 - 0.15);
-  parts.push(text(C.x - 0.04, y - 0.32, 1, 1.25, '“', 110, { color: 'accentText', font: 'serif', role: 'quote-mark', lh: 1 }));
+  parts.push(text(C.x - 0.04, y - 0.5, 1, 1.85, '“', 110, { color: 'accentText', font: 'serif', role: 'quote-mark', lh: 1.2, decorative: true }));
   parts.push(text(x, y, w, f.h, s.quote, f.pt, { font: 'heading', role: 'quote', tag: 'blockquote', lh: 1.3 }));
   if (attr) {
     parts.push(rect(x, y + f.h + 0.38, 0.36, 0.04, 'accent', { role: 'rule' }));
@@ -209,7 +220,7 @@ function quote(s, C, parts) {
   return f.fits;
 }
 function section(s, C, parts, number) {
-  if (number) parts.push(text(9.35, 1.45, 3.25, 2.9, String(number).padStart(2, '0'), 120, { color: 'onAccentFaint', bold: true, align: 'right', valign: 'bottom', font: 'heading', role: 'section-number', lh: 1, decorative: true }));
+  if (number) parts.push(text(9.35, 1.3, 3.25, 3.0, String(number).padStart(2, '0'), 120, { color: 'onAccentFaint', bold: true, align: 'right', valign: 'bottom', font: 'heading', role: 'section-number', lh: 1.3, spacing: -3, decorative: true }));
   if (!s.body) return true;
   const f = fit(s.body, C.w, C.h, 18, 14);
   parts.push(text(C.x, C.y, C.w, Math.min(C.h, f.h), s.body, f.pt, { color: 'onAccent', role: 'section-body', tag: 'p' }));
@@ -231,6 +242,8 @@ function agenda(s, C, parts) {
   return head.fits && sizes.every((f) => f.fits);
 }
 const BUILD = { section, quote, stats, timeline, cards, chart, agenda };
+// Parts inside the content box render in it; decorative parts outside it render on the slide.
+const insideContent = (p, c) => p.x >= c.x - 0.01 && p.y >= c.y - 0.01 && p.x + p.w <= c.x + c.w + 0.01 && p.y + p.h <= c.y + c.h + 0.01;
 // Geometry for any slide: { title, subtitle, content, cover, section, parts, dense }. 0.2 layouts get
 // an empty part list (their renderers lay out content themselves).
 function slideGeometry(s, { section: number = 0 } = {}) {
@@ -240,4 +253,4 @@ function slideGeometry(s, { section: number = 0 } = {}) {
   return { ...base, section: s.layout === 'section', parts, dense: !fits };
 }
 
-module.exports = { slideLayout, bodyHeight, slideGeometry, slidePalette, officeFonts, sectionNumbers, onFill, lineCount, textHeight, fit, V2_LAYOUTS, SLIDE_LAYOUTS, NEAR_BLACK };
+module.exports = { slideLayout, bodyHeight, slideGeometry, insideContent, slidePalette, officeFonts, sectionNumbers, onFill, lineCount, textHeight, fit, V2_LAYOUTS, SLIDE_LAYOUTS, NEAR_BLACK };

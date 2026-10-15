@@ -1,38 +1,29 @@
-FORMA 0.2.0 WINDOWS UPDATE
-14 October 2026
+FORMA 0.3.0 WINDOWS UPDATE
 
-This source update is for an existing Forma 0.1.0–0.1.3 portable Windows
-installation. It reuses its Node runtime and installed dependencies.
-No package download or npm install is needed. This is not a standalone EXE.
+For an existing Forma 0.1.x or 0.2.x portable Windows installation.
+0.3.0 adds no npm dependencies: the installed runtime\node.exe and
+node_modules keep working. No package download or npm install is needed.
 
-1. Stop both Forma services using the launcher or close their command windows.
-2. Copy your whole existing glm-design-pilot folder to a separate 0.2.0 folder
-   while stopped. Keep the original as a consistent backup, including data/.
-3. Extract this update ZIP to a temporary folder. Copy the CONTENTS of its
-   glm-design-pilot folder over your new installation's glm-design-pilot
-   folder. Replace program files; do not delete the destination first and
-   do not create glm-design-pilot/glm-design-pilot nesting.
-4. Retain runtime/node.exe, node_modules, .env and your copied data folder.
-   This archive contains none of these private/installed files.
-5. Run 02-start.cmd (or the existing optional Forma.exe). Keep the old copy
-   stopped because the copies normally use the same ports. Startup adds
-   style/feedback tables and any missing revision parent links. Existing
-   saved artifacts are retained. Reload the browser to load the new editor.
-6. Run 03-diagnostics.cmd if startup fails. package.json identifies 0.2.0.
-   To roll back, use the stopped original backup and its data; never run
-   both versions against one shared database folder.
+1. Stop Forma (press ENTER in the startup window, or Stop in Forma.exe).
+2. Copy your whole existing glm-design-pilot folder to a new 0.3.0 folder
+   while it is stopped. Keep the original, including data\, as a backup.
+3. Copy the CONTENTS of this repository's glm-design-pilot folder over the
+   new copy, replacing program files. Do not delete the destination first
+   and do not create glm-design-pilot\glm-design-pilot nesting.
+4. Keep runtime\node.exe, node_modules, .env and data from the old copy.
+   The new assets\ folder (fonts, icons, kit CSS) must be copied too.
+5. Optional: add the new GLM_* settings from .env.windows.example to your
+   .env. Every one has a safe default, so existing settings keep working.
+6. Run 03-diagnostics.cmd. It checks dependencies, the bundled assets and
+   your settings. Then run 02-start.cmd (or Forma.exe) and reload the
+   browser page. package.json should say 0.3.0.
+7. Startup migrates the database: it adds job columns and a source
+   documents table and converts nothing else. Saved projects, revisions,
+   styles, feedback and evaluations are kept. Older design systems gain the
+   new tokens automatically.
 
-Read STUDIO-GUIDE.md for linked screens, Design/Interact modes, reusable
-styles, feedback and handoff. Read TEAM-REVIEW.md for one GLM owner check
-and a short human review. Import Forma JSON and curated starters work
-without a model. They remain explicitly labelled and excluded from GLM
-quality totals. Demo Revise is disabled for these designs and copies.
+To roll back, stop 0.3.0 and start the original backup with its own data.
+Never run two versions against the same data folder.
 
-GLM configuration is unchanged. The review now covers all captured views
-in batches; multi-screen designs can use more model calls and take longer.
-Web PDF needs the browser renderer. Office PDF needs the actual LibreOffice
-and Poppler runtimes. Inspect native exports in the intended Office app.
-
-No credentials, data, installed dependencies or private reports are shipped.
-Keep the original runtime and dependency licenses with the installation.
-SHA256SUMS.txt lists hashes for the included program files.
+Alternatively build a complete new package on an internet-connected machine
+with: node scripts\package-windows.cjs (see START-HERE-WINDOWS.txt).

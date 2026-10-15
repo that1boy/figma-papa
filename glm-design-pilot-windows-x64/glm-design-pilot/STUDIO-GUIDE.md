@@ -1,35 +1,54 @@
-# Forma 0.2.0 studio guide
+# Forma 0.3.0 studio guide
 
-Start with a library starter to learn the editor without waiting for a model. The three flows contain labelled fictional content. In GLM mode, create a UI / UX project with a specific audience, key task, screen list, data and constraints. Up to two supplied screenshots can guide generation. The existing connection settings are unchanged.
+Start with a library starter to learn the editor without waiting for a model. The three flows (operations workspace, mobile discovery app, product website) contain labelled fictional content and use the 0.3 design kit. In GLM mode, create a project and describe the audience, the key task, the screens you expect, the data and any constraints.
 
-## Design a flow
+## Create a project
 
-1. Choose a screen on the left. Add, rename, copy or remove screens there; at least one remains. Linked navigation also switches the active screen.
-2. **Interact** runs the prototype. **Design** selects elements on the canvas or in Layers. Edit properties and click **Apply changes**. Container text is protected: select its text child to change words without deleting its children.
-3. Add a heading, text, button, card, form, table, tabs or dialog. Connect a button through **Link to screen**. A newly inserted button needs an action before it is a useful prototype control; Checks will flag inactive buttons.
-4. Use **Styles** for shared colors, local fonts, spacing and corners. Presets and saved style kits are reusable across projects. Applying styles updates the current draft and the project's GLM guidance; **Save design** records the artifact revision. Token-based CSS responds to styles; hard-coded colors in imported markup may need direct editing.
-5. Switch Desktop / Tablet / Mobile or enter a width. Fit scales the viewport into the available space; 100% shows actual pixels. **Focus** hides the brief panel; **Show brief** returns it.
-6. Undo/redo applies to the current draft. **Save design** creates a persistent revision; **History** inspects or restores older versions. Ctrl+S saves a canvas draft, Ctrl+Z / Ctrl+Shift+Z undo/redo outside text fields. Escape leaves Design mode.
+1. Choose **UI / UX design**, **Presentation** or **Document**.
+2. Name it and add brand guidance if you have any.
+3. Pick a **design system** preset, or leave it on Auto and GLM chooses one that fits the brief. Presets set colours, fonts, radius, spacing, density and shadows; everything the kit draws follows them.
+4. Add up to six **reference images** (PNG, JPEG or WebP) and up to six **source documents** (DOCX, PPTX, XLSX, CSV, TSV, TXT, Markdown, HTML, JSON). Forma extracts the text and shows a summary for each document. GLM treats both as facts to use, never as instructions to follow. You can add or remove sources later from the **Sources** panel.
 
-The **Edit** panel exposes all screen markup and shared CSS, plus advanced artifact JSON. Load changed JSON into the editor before saving. Switching away from unsaved edits is guarded; a reload can still lose a discarded draft. Saved revisions survive restart.
+## Generate and revise in the chat
 
-## Iterate and review
+- Type the brief and press **Generate** (Ctrl/Cmd+Enter). While GLM works, a live turn shows the current stage (planning, building each screen, rendering, reviewing) and how much it has written.
+- Each finished turn says what happened: how many screens were built or changed, the preset, model calls, tokens, duration and the design lint score. Failed or cancelled jobs appear with a **Retry** button.
+- To revise, type what should change and press **Revise**. For web projects GLM returns only the screens that change; the others stay exactly as they were. The suggestion chips (for example *Make it denser*, *Improve mobile layout*) fill in common requests.
+- **Review content and layout** (on by default) renders the result, runs the design lint and lets GLM review it, then applies one correction pass. It is the same model reviewing its own work, not independent acceptance.
 
-Select an element and **Ask GLM to refine this** to prepare a targeted request in the brief box. Review it and submit Revise. Generated output replaces the artifact through the normal validated revision workflow; it is not a guaranteed isolated DOM patch. Check untouched screens after revisions.
+## Explore directions
 
-**Feedback** stores notes against the saved revision, current screen and optional element. Resolve/reopen them or put a note into the brief. Notes remain with their revision rather than silently moving to a changed design. **Explore copy** starts an independent project with selected source context and styling, without inheriting an old model review as evidence.
+For a web project, set **Directions** to 2, 3 or 4 before generating. GLM plans and builds that many genuinely different variants in parallel (calm and clear, bold and expressive, dense and efficient, warm and editorial). A picker above the preview shows one card per direction. View any of them, then choose **Use this direction** to continue from it.
 
-**Checks → Render exports** captures all screens at three widths and enables PDF. Inspect the responsive table, rendered images and actual interactions. Model review is optional and can add several requests for multi-screen work. It is the same configured model reviewing its own output, not independent acceptance.
+## Edit in the studio
+
+1. **Interact** runs the prototype; **Design** selects elements on the canvas or in **Layers**. Icons and charts are single layers, marked with a badge.
+2. Edit text, colour, size, spacing, radius, layout and links in the inspector and click **Apply changes**.
+3. **Ask GLM to refine this**: describe a change for the selected element and choose **Apply with GLM**. Only that element is sent and replaced. The result is an undoable draft change; **Save design** records it with your instruction in the revision history. Not available in demo mode.
+4. **Tweaks** opens sliders for the layout knobs GLM proposed for this design (for example sidebar width or card gap) and for the core tokens: accent, radius, spacing, type scale, density and fonts. Changes apply live in the preview; **Apply tweaks** writes them to the draft.
+5. **Styles** edits the full design system, switches presets, saves reusable styles, and can **Import from CSS / tokens / Tailwind**: paste or upload a stylesheet, a design-token JSON file or a Tailwind config and Forma fills in the colours, fonts, radius and spacing it finds.
+6. **Add a component** inserts kit-based building blocks (heading, text, button, button group, card, stats, table, form field, form, tabs, dialog, empty state, alert, sample chart).
+7. Switch Desktop / Tablet / Mobile or enter a width. Undo/redo applies to the draft; **Save design** creates a revision. Ctrl+S saves, Ctrl+Z / Ctrl+Shift+Z undo and redo outside text fields, Escape leaves Design mode.
+
+The **Edit** tab exposes all screen markup, shared CSS and the advanced artifact JSON.
+
+## Checks
+
+- **Design lint**: a score out of 100 and findings grouped by rule, errors first. Rules cover WCAG contrast, text under 12 px, small tap targets on mobile, horizontal overflow, clipped or overlapping text, images without alt text, unnamed controls, skipped heading levels, broken navigation and unknown icons or classes.
+- **Model calls**: every call with its stage, duration, input, output and reasoning tokens, retries, and whether images were dropped because the endpoint refused them.
+- **Responsive screen checks** and **Render exports**: every screen at 1280, 768 and 390 px, plus PDF.
+
+## Slides and documents
+
+Decks can use cover, bullets, two-column, table, image, section, quote, stats, timeline, cards, chart and agenda layouts. Stats and charts only use numbers from your brief or sources. PPTX export is native and editable, including charts. Documents export to editable Word. The preview approximates Office layout; inspect exported files in Office.
 
 ## Share and continue
 
-- **Handoff ZIP:** self-contained index.html, per-screen HTML, shared CSS, design tokens, reference files, Forma JSON and a README with source context, feedback and provenance. Open index.html locally; no server is required for prototype interactions.
-- **Forma JSON:** import it to continue editing in a new Forma project. Reattach references in their original numbered slots. It is a selected artifact, not a backup of the database or full revision history.
-- **HTML / PDF:** interactive prototype or static rendered pages. Web PDF requires the browser renderer. Native Office PDF additionally requires LibreOffice and Poppler.
-- **PPTX / DOCX:** existing native editable output, including text/tables and PowerPoint notes. Browser previews approximate Office layout; inspect the exported files in the intended Office runtime.
+- **Handoff ZIP**: index.html, per-screen HTML, `kit.css` (fonts, tokens, components and the utility classes the design uses), `styles.css`, `tokens.json`, references, Forma JSON and a README with source context, feedback and provenance. Open index.html locally; no server is needed.
+- **Forma JSON**: import it into another Forma installation to keep editing.
+- **HTML / PDF / PPTX / DOCX** as before.
+- **Feedback** stores notes against a saved revision, screen and element. **Explore a copy** starts an independent project.
 
 ## Scope
 
-Forma supports responsive HTML/CSS UI prototypes for web and mobile-shaped app flows. It does not produce deployable React/Flutter/native apps, working databases or payments. Forms give explicit local-only confirmation. Generated arbitrary JavaScript and remote resources stay disabled.
-
-Property-based layout editing is supported; freeform drag/resize, arbitrary layer reparenting, real-time multiplayer editing, user identities, public share hosting, SSO and Figma connectors are not included. The application is a shared-password workspace suitable for a small controlled pilot. The UI supports twelve screens, not unlimited canvases; content and reference limits still apply.
+Forma produces responsive HTML/CSS prototypes with declarative interactions, not deployable apps. Model-written JavaScript and remote resources stay disabled. There is one shared password and workspace; there is no SSO, per-user attribution, live multiplayer editing or public sharing.

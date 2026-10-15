@@ -55,24 +55,15 @@ function demo(kind, previous) {
           body: 'One place to find services and track requests.',
           notes: 'Fixed demonstration deck. No company performance data is asserted.',
         },
+        // Slides v2 layouts (cards, timeline) around the table slide. core.test pins four slides
+        // with the table third; test/browser.cjs adds body text and a bullet to that table slide.
         {
-          layout: 'two-column',
+          layout: 'cards',
           title: 'The proposed experience',
-          columns: [
-            {
-              heading: 'For employees',
-              body: 'A clear starting point for everyday requests.',
-              bullets: ['Find the right service', 'See request status', 'Know who can help'],
-            },
-            {
-              heading: 'For service teams',
-              body: 'Consistent intake and clearer ownership.',
-              bullets: [
-                'Collect the required details',
-                'Route requests to the right owner',
-                'Keep employees informed',
-              ],
-            },
+          cards: [
+            { title: 'For employees', body: 'A clear starting point: find the right service, see request status and know who can help.', icon: 'users' },
+            { title: 'For service teams', body: 'Consistent intake and clearer ownership, with requests routed to the right owner.', icon: 'route' },
+            { title: 'For the pilot review', body: 'Evidence from the pilot, not assumptions, before any decision to expand.', icon: 'clipboard-check' },
           ],
           notes: 'These are proposed capabilities, not measured results.',
         },
@@ -90,16 +81,16 @@ function demo(kind, previous) {
           notes: 'Owners are placeholders.',
         },
         {
-          layout: 'bullets',
+          layout: 'timeline',
           title: 'Evidence for the rollout decision',
           body: 'Compare the pilot with the current service process.',
-          bullets: [
-            'Measure time to submit a complete request',
-            'Review routing accuracy and unanswered questions',
-            'Collect employee and service-team feedback',
-            'Expand only after reviewing the evidence',
+          steps: [
+            { label: 'Measure', title: 'Submission time', detail: 'How long it takes to submit a complete request.' },
+            { label: 'Review', title: 'Routing accuracy', detail: 'Whether requests reach the right team, and which questions go unanswered.' },
+            { label: 'Listen', title: 'Feedback', detail: 'What employees and service teams say about the new process.' },
+            { label: 'Decide', title: 'Expand or adjust', detail: 'Expand only after reviewing the evidence.' },
           ],
-          notes: 'Set acceptance thresholds before evaluating the pilot.',
+          notes: 'Set acceptance thresholds before evaluating the pilot. No dates are set for these steps.',
         },
       ],
     };

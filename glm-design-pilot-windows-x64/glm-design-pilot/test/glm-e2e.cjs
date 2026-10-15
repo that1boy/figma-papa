@@ -47,7 +47,7 @@ async function sourceDocx() {
   const results = process.env.TEST_RESULTS_DIR || path.join(root, 'test-results', 'glm-e2e');
   await fs.mkdir(results, { recursive: true });
   const shots = [];
-  let mock, renderer, app, browser;
+  let mock, renderer, app, browser, page;
   const t0 = Date.now(), steps = [];
   const step = (name) => (steps.push({ name, s: Math.round((Date.now() - t0) / 1000) }), console.log(`[${steps.at(-1).s}s] ${name}`));
   try {
@@ -60,11 +60,14 @@ async function sourceDocx() {
     const api = await client(app.url, PASSWORD);
     browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}) });
     const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, acceptDownloads: true });
-    const page = await context.newPage(), errors = [];
+    page = await context.newPage();
+    const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
     page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && console.error('Browser console:', m.text()));
     const frame = page.frameLocator('#preview-frame');
-    const shot = async (name) => { const file = path.join(results, name + '.png'); await page.screenshot({ path: file, fullPage: true }); shots.push(file); };
+    // The preview's runtime script follows the (large, font-inlining) page body: wait for it before clicking.
+    const frameReady = () => frame.locator('body').evaluate(() => new Promise((r) => { const t = setInterval(() => typeof window.formaNavigate === 'function' && (clearInterval(t), r()), 25); }));
+    const shot = async (name) => { const file = path.join(results, name + '.png'); await page.screenshot({ path: file }); shots.push(file); };
     // Waits for the active job to start and finish while sampling the live label.
     async function runJob(timeout = 240000) {
       await page.locator('#job-status').waitFor({ state: 'visible', timeout: 20000 });
@@ -153,11 +156,26 @@ async function sourceDocx() {
     assert.equal(await page.locator('.screen-item').count(), 3);
     await page.locator('#canvas-zoom').selectOption('1');
     await frame.getByRole('heading', { name: 'Service overview' }).waitFor();
+    await frameReady();
     assert((await frame.locator('[data-forma-expanded="icon"]').count()) > 5, 'icons expanded in the preview');
     assert.equal(await frame.locator('[data-forma-screen="overview"] i[data-icon]').count(), 0, 'no unexpanded icon hosts');
-    await frame.locator('[data-forma-expanded="chart"] svg[role="img"]').first().waitFor();
+    await frame.locator('[data-forma-expanded="chart"] svg[role="img"]:visible').first().waitFor();
     assert.match(await frame.locator('[data-forma-expanded="chart"]').first().innerText(), /Finance|Sales/);
     // Real navigation in the prototype.
+    if (process.env.GLM_E2E_DEBUG) {
+      const b = frame.getByRole('button', { name: 'Open the queue' });
+      console.log('DEBUG', await b.evaluate((n) => { const r = n.getBoundingClientRect(); const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return { hash: location.hash, hit: hit && hit.outerHTML.slice(0, 120), rect: [r.x, r.y, r.width, r.height], inner: [innerWidth, innerHeight], ds: document.body.dataset && Object.keys(document.body.dataset) }; }));
+      console.log('DEBUG parent', await page.evaluate(() => { const f = document.querySelector('#preview-frame'); const r = f.getBoundingClientRect(); return { rect: [r.x, r.y, r.width, r.height], style: f.getAttribute('style'), cc: [document.querySelector('#canvas-center').scrollLeft, document.querySelector('#canvas-center').clientWidth] }; }));
+      await page.evaluate(() => { window.__hits = []; document.addEventListener('mousedown', (e) => window.__hits.push([e.clientX, e.clientY, e.target.id || e.target.className || e.target.tagName]), true); });
+      await b.evaluate(() => { window.__hits = []; document.addEventListener('mousedown', (e) => window.__hits.push([e.clientX, e.clientY, e.target.outerHTML.slice(0, 60)]), true); document.addEventListener('click', (e) => window.__hits.push(['click', e.defaultPrevented, e.target.outerHTML.slice(0, 60)]), true); });
+      await b.click();
+      await page.waitForTimeout(500);
+      console.log('DEBUG hits parent', await page.evaluate(() => window.__hits), 'frame', await b.evaluate(() => window.__hits).catch((e) => e.message));
+      console.log('DEBUG state frame', await b.evaluate((n) => ({ open: [...document.querySelectorAll('dialog')].map((d) => d.id + ':' + d.open), pe: getComputedStyle(n).pointerEvents, html: document.documentElement.style.cssText, inert: !!n.closest('[inert]'), cursor: getComputedStyle(n).cursor })));
+      console.log('DEBUG state parent', await page.evaluate(() => ({ open: [...document.querySelectorAll('dialog[open]')].map((d) => d.id), pe: getComputedStyle(document.querySelector('#preview-frame')).pointerEvents, inert: [...document.querySelectorAll('[inert]')].map((n) => n.id || n.className), sandbox: document.querySelector('#preview-frame').getAttribute('sandbox'), src: document.querySelector('#preview-frame').src.slice(-50) })));
+      console.log('DEBUG parent after', await page.evaluate(() => { const f = document.querySelector('#preview-frame'); const r = f.getBoundingClientRect(); return { rect: [r.x, r.y], cc: document.querySelector('#canvas-center').scrollLeft }; }));
+      console.log('DEBUG after click', await frame.locator('body').evaluate(() => ({ hash: location.hash, vis: [...document.querySelectorAll('[data-forma-screen]')].filter((n) => !n.hidden).map((n) => n.dataset.formaScreen), active: document.activeElement?.outerHTML.slice(0, 80) })));
+    }
     await frame.getByRole('button', { name: 'Open the queue' }).click();
     await frame.getByRole('heading', { name: 'Requests', exact: true }).waitFor();
     await frame.getByRole('searchbox', { name: 'Search requests' }).fill('payroll');
@@ -210,6 +228,7 @@ async function sourceDocx() {
     await page.locator('#directions-strip [data-direction-view]').nth(1).click();
     await page.locator('#directions-strip .direction-card.is-viewing').filter({ hasText: 'Bold and expressive' }).waitFor();
     await frame.getByText('Live queue', { exact: true }).waitFor();
+    await frameReady();
     await shot('06-direction-viewing');
     const viewed = (await project()).revisions.find((r) => r.metrics?.direction?.name === 'Bold and expressive');
     await page.locator(`[data-direction-use="${viewed.id}"]`).click();
@@ -223,6 +242,7 @@ async function sourceDocx() {
     step('element edit');
     await page.locator('#canvas-zoom').selectOption('1');
     await frame.getByRole('heading', { name: 'Service overview' }).waitFor();
+    await frameReady();
     await page.locator('#design-mode').click();
     await frame.getByRole('heading', { name: 'Service overview' }).click();
     await page.locator('#element-instruction').waitFor();
@@ -230,6 +250,7 @@ async function sourceDocx() {
     await page.locator('#element-instruction').fill('Make this heading more specific and add a live status badge.');
     await page.locator('#element-edit-submit').click();
     await frame.locator('h1', { hasText: 'Service desk overview' }).waitFor();
+    await frameReady();
     await page.locator('#draft-status').filter({ hasText: 'Unsaved changes' }).waitFor();
     assert.match(await page.locator('#element-edit-status').innerText(), /Applied/);
     const edit = mock.requests.filter((r) => r.stage === 'element').at(-1);
@@ -251,6 +272,8 @@ async function sourceDocx() {
     await page.locator('#studio-tweaks').click();
     const slider = page.locator('[data-tweak="--aside-width"]');
     await slider.waitFor();
+    await frame.locator('.overview-grid').waitFor();
+    await frameReady();
     const asideWidth = () => frame.locator('.overview-grid > section').nth(1).evaluate((n) => Math.round(n.getBoundingClientRect().width));
     const cssVar = () => frame.locator('html').evaluate((n) => getComputedStyle(n).getPropertyValue('--aside-width').trim());
     assert.equal(await cssVar(), '340px');
@@ -346,6 +369,10 @@ async function sourceDocx() {
     await fs.writeFile(path.join(results, 'glm-e2e-summary.json'), JSON.stringify({ steps, labels, lintScore: score, calls: stages, mockRequests: counts, screenshots: shots }, null, 2));
     console.log('GLM e2e passed:', JSON.stringify(counts), `in ${Math.round((Date.now() - t0) / 1000)}s`);
     console.log('Evidence: ' + results);
+  } catch (e) {
+    await page?.screenshot({ path: path.join(results, 'failure.png'), fullPage: true }).catch(() => {});
+    console.error('Server log tail:\n' + (app?.logs?.() || '').slice(-3000));
+    throw e;
   } finally {
     await browser?.close();
     await stop(app);

@@ -829,14 +829,26 @@ function drawEditor(value = state.revision.artifact) {
     html +=
       (a.screens ? a.screens.map((s,i)=>`<section class="edit-block"><h3>${esc(s.name)}</h3>${inputField('Screen name',s.name,`screens.${i}.name`)}${inputField('HTML body',s.html,`screens.${i}.html`,true,true)}</section>`).join('') : inputField('HTML body', a.html, 'html', true, true)) +
       inputField('CSS', a.css, 'css', true, true);
-  else if (a.kind === 'slides')
+  else if (a.kind === 'slides') {
+    // Slides v2 layouts edit only the fields they show; object lists are edited as JSON.
+    const json = (label, value, path) => inputField(label, JSON.stringify(value, null, 2), path, true, true);
+    const v2 = {
+      section: (s, i) => inputField('Body', s.body, `slides.${i}.body`, true),
+      quote: (s, i) => inputField('Quote', s.quote, `slides.${i}.quote`, true) + inputField('Attribution', s.attribution, `slides.${i}.attribution`),
+      stats: (s, i) => inputField('Intro (optional)', s.body, `slides.${i}.body`, true) + json('Stats JSON — 2 to 4 {value, label, detail}', s.stats, `slides.${i}.stats`),
+      timeline: (s, i) => inputField('Intro (optional)', s.body, `slides.${i}.body`, true) + json('Steps JSON — 3 to 6 {label, title, detail}', s.steps, `slides.${i}.steps`),
+      cards: (s, i) => inputField('Intro (optional)', s.body, `slides.${i}.body`, true) + json('Cards JSON — 3 to 4 {title, body, icon}', s.cards, `slides.${i}.cards`),
+      chart: (s, i) => inputField('Takeaway (optional)', s.body, `slides.${i}.body`, true) + json('Chart JSON', s.chart, `slides.${i}.chart`),
+      agenda: (s, i) => inputField('Intro (optional)', s.body, `slides.${i}.body`, true) + inputField('Agenda items — one per line', s.bullets.join('\n'), `slides.${i}.bullets`, true),
+    };
     html += a.slides
       .map(
-        (s, i) =>
-          `<section class="edit-block"><h3>SLIDE ${i + 1} / ${esc(String(s.layout).toUpperCase())}</h3>${inputField('Title', s.title, `slides.${i}.title`)}${inputField('Subtitle', s.subtitle, `slides.${i}.subtitle`)}${inputField('Body', s.body, `slides.${i}.body`, true)}${inputField('Bullets — one per line', s.bullets.join('\n'), `slides.${i}.bullets`, true)}${s.columns.map((c, j) => inputField(`Column ${j + 1} heading`, c.heading, `slides.${i}.columns.${j}.heading`) + inputField(`Column ${j + 1} body`, c.body, `slides.${i}.columns.${j}.body`, true) + inputField(`Column ${j + 1} bullets`, c.bullets.join('\n'), `slides.${i}.columns.${j}.bullets`, true)).join('')}${s.table ? inputField('Table JSON', JSON.stringify(s.table, null, 2), `slides.${i}.table`, true, true) : ''}${inputField('Speaker notes', s.notes, `slides.${i}.notes`, true)}</section>`,
+        (s, i) => v2[s.layout]
+          ? `<section class="edit-block"><h3>SLIDE ${i + 1} / ${esc(String(s.layout).toUpperCase())}</h3>${inputField('Title', s.title, `slides.${i}.title`)}${inputField('Subtitle', s.subtitle, `slides.${i}.subtitle`)}${v2[s.layout](s, i)}${inputField('Speaker notes', s.notes, `slides.${i}.notes`, true)}</section>`
+          : `<section class="edit-block"><h3>SLIDE ${i + 1} / ${esc(String(s.layout).toUpperCase())}</h3>${inputField('Title', s.title, `slides.${i}.title`)}${inputField('Subtitle', s.subtitle, `slides.${i}.subtitle`)}${inputField('Body', s.body, `slides.${i}.body`, true)}${inputField('Bullets — one per line', s.bullets.join('\n'), `slides.${i}.bullets`, true)}${s.columns.map((c, j) => inputField(`Column ${j + 1} heading`, c.heading, `slides.${i}.columns.${j}.heading`) + inputField(`Column ${j + 1} body`, c.body, `slides.${i}.columns.${j}.body`, true) + inputField(`Column ${j + 1} bullets`, c.bullets.join('\n'), `slides.${i}.columns.${j}.bullets`, true)).join('')}${s.table ? inputField('Table JSON', JSON.stringify(s.table, null, 2), `slides.${i}.table`, true, true) : ''}${inputField('Speaker notes', s.notes, `slides.${i}.notes`, true)}</section>`,
       )
       .join('');
-  else
+  } else
     html +=
       inputField('Subtitle', a.subtitle, 'subtitle') +
       a.blocks
@@ -857,7 +869,7 @@ function collectEditor() {
     for (const p of parts) node = node[p];
     node[key] = ['bullets', 'items'].includes(key)
       ? el.value.split('\n').filter((x) => x.trim())
-      : key === 'table'
+      : ['table', 'stats', 'steps', 'cards', 'chart'].includes(key)
         ? JSON.parse(el.value)
         : el.value;
   });
