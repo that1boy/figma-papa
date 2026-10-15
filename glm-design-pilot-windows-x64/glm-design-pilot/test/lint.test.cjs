@@ -255,6 +255,18 @@ describe('staticLint: slides and documents', () => {
     assert.deepEqual(by('slide-title'), ['slide-7']);
     assert.equal(f[0].severity, 'error');
   });
+  it('allows agenda slides the 8 items the schema accepts', () => {
+    const items = (n) => Array.from({ length: n }, (_, i) => `Item ${i + 1}`);
+    const f = shape(staticLint({ kind: 'slides', title: 'Deck', slides: [
+      { id: 'slide-1', layout: 'agenda', title: 'Agenda', bullets: items(8) },
+      { id: 'slide-2', layout: 'agenda', title: 'Long agenda', bullets: items(9) },
+      { id: 'slide-3', layout: 'bullets', title: 'Bullets', bullets: items(7) },
+    ] }));
+    const dense = of(f, 'slide-dense');
+    assert.deepEqual(dense.map((x) => x.screen), ['slide-2', 'slide-3']);
+    assert.match(dense[0].message, /9 agenda items; keep to 8 or fewer/);
+    assert.match(dense[1].message, /7 bullets; keep to 6 or fewer/);
+  });
   it('checks document structure, length and tables', () => {
     const f = shape(staticLint({ kind: 'document', title: 'Report [Company name]', blocks: [
       { id: 'block-1', type: 'heading', text: 'H'.repeat(95) },

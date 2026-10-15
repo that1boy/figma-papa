@@ -281,7 +281,8 @@ function slidesLint(a, deps) {
     if (title.length > 75) F('slide-title-long', 'warning', 'title', `${label} title is ${title.length} characters; keep slide titles under 75 so they fit on one or two lines.`);
     if (txt(s.subtitle).length > 140) F('slide-subtitle-long', 'warning', 'subtitle', `${label} subtitle is ${txt(s.subtitle).length} characters; keep it under 140.`);
     bullets.forEach((b, k) => { if (b.length > 120) F('slide-bullet-long', 'warning', `bullets[${k}]`, `${label} bullet ${k + 1} is ${b.length} characters; keep bullets under 120 and move detail to speaker notes.`); });
-    if (bullets.length > 6) F('slide-dense', 'warning', 'bullets', `${label} has ${bullets.length} bullets; keep to 6 or fewer.`);
+    const maxBullets = s.layout === 'agenda' ? 8 : 6;
+    if (bullets.length > maxBullets) F('slide-dense', 'warning', 'bullets', `${label} has ${bullets.length} ${s.layout === 'agenda' ? 'agenda items' : 'bullets'}; keep to ${maxBullets} or fewer.`);
     const amount = body.length + bullets.join('').length;
     if (amount > 650) F('slide-dense', 'warning', 'slide', `${label} carries ${amount} characters of body text; split it or move detail to speaker notes.`);
     cols.forEach((c, k) => { const n = txt(c.body).length + list(c.bullets).join('').length; if (n > 400) F('slide-dense', 'warning', `columns[${k}]`, `${label} column ${k + 1} carries ${n} characters; keep each column under 400.`); });

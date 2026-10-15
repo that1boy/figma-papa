@@ -348,6 +348,7 @@ async function openProject(pid) {
   if (state.project?.id !== project.id) {
     state.directions = 1;
     state.lintAll = false;
+    $('review-checkbox').checked = true;
   }
   state.project = project;
   state.revision = state.project.current;
@@ -991,7 +992,7 @@ function updateBusy(job) {
   document.querySelectorAll('[data-directions]').forEach((b) => (b.disabled = busy || lockedDemo()));
   document.querySelectorAll('[data-retry-job]').forEach((b) => (b.disabled = busy));
   if (lockedDemo()) $('composer-hint').textContent='Edit this design with the canvas controls. Connect GLM to adapt it using a brief.';
-  if (busy) $('job-stage').textContent = String(job.progress?.label || job.stage || '').replace(/\s*·\s*[\d.]+k characters$/, '');
+  if (busy) $('job-stage').textContent = $('live-turn') ? 'Working… progress is shown in the chat.' : String(job.progress?.label || job.stage || '').replace(/\s*·\s*[\d.]+k characters$/, '');
   if (state.project && state.lastBusy !== busy) drawSources();
   state.lastBusy = busy;
 }
